@@ -2,7 +2,9 @@ from setuptools import setup
 from Cython.Build import cythonize
 
 setup(
-    ext_modules=cythonize(["src/cyxls.pyx", "src/parser.pyx", "src/writer.pyx"]),
-    # include_dirs=['/usr/include/libxml2'],
+    ext_modules=cythonize(
+        ["cytosheet/cell.pyx", "cytosheet/workbook.pyx", "cytosheet/worksheet.pyx"],
+        compiler_directives={'language_level': "3"}
+    ),
     zip_safe=False,
 )

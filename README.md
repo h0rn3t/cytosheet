@@ -15,14 +15,10 @@ Cytosheet is a PoC library for working with XLSX files, written in Cython.
 
 - Python 3.7+
 - Cython
-- libxml2
-
+- lxml
 ### Install from source
 
    pip install .
    python -m build
+   python setup.py build_ext --inplace
 
-1. Install dependencies:
-
-   ```bash
-   sudo apt-get install libxml2-dev  # For Ubuntu/Debian

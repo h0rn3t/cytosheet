@@ -6,5 +6,5 @@ Author-email: Your Name <your.email@example.com>
 License: MIT
 Project-URL: homepage, https://github.com/yourusername/cytosheet
 Project-URL: repository, https://github.com/yourusername/cytosheet
-Requires-Dist: Cython>=0.29
+Requires-Dist: Cython>=3.0.11
 Requires-Dist: lxml>=4.9
