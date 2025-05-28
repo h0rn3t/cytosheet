@@ -1,6 +1,9 @@
 from zipfile import ZipFile
 
-from src.cytosheet import Workbook, Worksheet
+# Use relative imports so the module works both when running from the source
+# tree and when installed as a package.
+from .workbook import Workbook
+from .worksheet import Worksheet
 
 
 def load_workbook(filename: str, read_only: bool=False):
