@@ -1,8 +1,12 @@
 import os
-from zipfile import ZipFile
-from lxml import etree
 from io import BytesIO
+from zipfile import ZipFile
+
+from lxml import etree
+
 from .worksheet import Worksheet
+
+NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
 # XML templates
 WORKBOOK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -62,15 +66,33 @@ cdef class Workbook:
             return lower_sheets[sheet_name_lower]
         raise KeyError(f"No sheet named '{sheet_name}' exists.")
 
-    cpdef void _parse_shared_strings(self, bytes xml_data):
-        """
-        Parses shared strings from the sharedStrings.xml file and stores them
-        in the shared strings list.
-        """
-        root = etree.fromstring(xml_data)
-        strings = root.xpath('//si')
-        for s in strings:
-            self._shared_strings.append(s.xpath('string(.)')[0])
+    def __getitem__(self, key: str):
+        """Return worksheet by name (openpyxl compatibility)."""
+        return self.get_sheet_by_name(key)
+
+    @property
+    def worksheets(self):
+        """Return list of worksheets (openpyxl compatibility)."""
+        return list(self._sheets.values())
+
+    def close(self):
+        """Release workbook resources (openpyxl compatibility)."""
+        self._sheets.clear()
+        self._shared_strings.clear()
+
+cpdef void _parse_shared_strings(self, object xml_source):
+    """Stream parse sharedStrings.xml for better performance."""
+    cdef object xml_stream
+    cdef etree._Element elem
+
+    if isinstance(xml_source, bytes):
+        xml_stream = BytesIO(xml_source)
+    else:
+        xml_stream = xml_source
+
+    for _, elem in etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 't'):
+        self._shared_strings.append(elem.text or "")
+        elem.clear()
 
     def create_sheet(self, title: str = None):
         """
