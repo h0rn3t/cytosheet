@@ -34,8 +34,21 @@ python -m build
 ### Running tests
 
 
+After building the Cython extensions you can execute the test suite. Add the
+`src` directory to `PYTHONPATH` or install the package in editable mode:
+
+```
+export PYTHONPATH=$(pwd)/src
+```
+
+Install `pytest` and (optionally) `openpyxl` for the performance comparison:
+
+```
+pip install pytest [openpyxl]
+=======
+
 ```
 pip install openpyxl pytest
-pytest
+
 ```
 
