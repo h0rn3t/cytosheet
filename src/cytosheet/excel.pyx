@@ -1,6 +1,7 @@
 from zipfile import ZipFile
 
-from src.cytosheet import Workbook, Worksheet
+from .workbook import Workbook
+from .worksheet import Worksheet
 
 
 def load_workbook(filename: str, read_only: bool=False):
