@@ -1,6 +1,5 @@
 from zipfile import ZipFile
 
-
 from .workbook import Workbook
 from .worksheet import Worksheet
 
