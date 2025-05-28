@@ -12,6 +12,7 @@ cdef class Worksheet:
     cdef public str title
     cdef public list _shared_strings
     cdef public dict _data
+    cdef public set _merged_cells
 
 
     def __init__(self, list shared_strings=None, str title="Sheet"):
@@ -21,6 +22,7 @@ cdef class Worksheet:
         self._cells = {}
         self._shared_strings = shared_strings
         self._data = {}
+        self._merged_cells = set()
 
     def __getitem__(self, key: str):
         if key in self._cells:
@@ -36,6 +38,16 @@ cdef class Worksheet:
         # Устанавливаем значение ячейки
         self._cells[cell] = value
 
+    def merge_cells(self, range_string: str):
+        self._merged_cells.add(range_string)
+
+    def unmerge_cells(self, range_string: str):
+        self._merged_cells.discard(range_string)
+
+    @property
+    def merged_cells(self):
+        return self._merged_cells
+
     cpdef cell(self, int row, int column, value=None):
         """Return or create a cell by numeric coordinates (openpyxl compatibility)."""
         cdef str col_letter = chr(ord('A') + column - 1)
@@ -50,12 +62,20 @@ cdef class Worksheet:
         """Parse worksheet XML using iterparse for better performance."""
         xml_stream = io.BytesIO(xml_data)
 
-        cdef object context = etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 'c')
+        cdef object root = etree.fromstring(xml_data)
+        for m in root.findall('.//' + NS_MAIN + 'mergeCell'):
+            ref = m.attrib.get('ref')
+            if ref:
+                self._merged_cells.add(ref)
+
+        cdef object context = etree.iterparse(io.BytesIO(xml_data), events=('end',), tag=NS_MAIN + 'c')
         cdef object event
         cdef object cell
         cdef str col_ref
         cdef object value_elem
+        cdef object formula_elem
         cdef object value
+        cdef object style_id
         cdef int shared_string_index
         cdef int ss_len = len(self._shared_strings)
         for event, cell in context:
@@ -63,13 +83,20 @@ cdef class Worksheet:
             cell_type = cell.attrib.get('t')
             value = None
             value_elem = cell.find(NS_MAIN + 'v')
+            formula_elem = cell.find(NS_MAIN + 'f')
+            style_id = cell.attrib.get('s')
             if cell_type == 's' and value_elem is not None:
                 shared_string_index = int(value_elem.text)
                 if shared_string_index < ss_len:
                     value = self._shared_strings[shared_string_index]
             elif value_elem is not None:
                 value = str(value_elem.text)
-            self._cells[col_ref] = PyCell(position=col_ref, value=value)
+            self._cells[col_ref] = PyCell(
+                position=col_ref,
+                value=value,
+                formula=formula_elem.text if formula_elem is not None else None,
+                style_id=style_id,
+            )
             cell.clear()
 
     def get_xml_data(self) -> bytes:
@@ -78,15 +105,23 @@ cdef class Worksheet:
         :return:
         """
         rows_data = {}
+        cdef object cell
+        cdef str cell_position
+        cdef int row
+        cdef str column
         for cell_position, cell in self._cells.items():
-            if cell.value is not None:
-                # Разделим позицию на букву колонки и номер строки
+            if cell.value is not None or cell.formula is not None:
                 column, row = cell_position[0], int(cell_position[1:])
                 if row not in rows_data:
                     rows_data[row] = []
-                # Добавляем ячейку с указанием типа данных (строка)
+                cdef list parts = []
+                if cell.formula is not None:
+                    parts.append(f'<f>{cell.formula}</f>')
+                if cell.value is not None:
+                    parts.append(f'<v>{cell.value}</v>')
+                cdef str style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
                 rows_data[row].append(
-                    f'<c r="{cell_position}" t="str"><v>{cell.value}</v></c>'
+                    f'<c r="{cell_position}"{style_attr} t="str">{"".join(parts)}</c>'
                 )
 
         # Генерируем строки XML с каждой строкой, содержащей свои ячейки
@@ -94,11 +129,17 @@ cdef class Worksheet:
             f'<row r="{row}">{" ".join(cells)}</row>'
             for row, cells in sorted(rows_data.items())
         ]
+        merge_xml = ''
+        if self._merged_cells:
+            merge_elems = [f'<mergeCell ref="{rng}"/>' for rng in sorted(self._merged_cells)]
+            merge_xml = f'<mergeCells count="{len(self._merged_cells)}">{" ".join(merge_elems)}</mergeCells>'
+
         xml_content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
             <sheetData>
                 {" ".join(rows_xml)}
             </sheetData>
+            {merge_xml}
         </worksheet>"""
 
         return xml_content.encode('utf-8')
