@@ -33,8 +33,6 @@ python -m build
 
 ### Running tests
 
-After building the Cython extensions you can run the test suite. The
-performance comparison tests also require the `openpyxl` package.
 
 ```
 pip install openpyxl pytest
