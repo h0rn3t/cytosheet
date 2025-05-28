@@ -2,7 +2,7 @@ import io
 
 from lxml import etree
 
-from .cell import Cell
+from .cell cimport Cell
 
 NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
@@ -44,9 +44,11 @@ cdef class Worksheet:
             c.value = value
         return c
 
-    cpdef void _parse_sheet(self, bytes xml_data):
-        """Parse worksheet XML using iterparse for better performance."""
-        cdef io.BytesIO xml_stream = io.BytesIO(xml_data)
+    cpdef void _parse_sheet(self, xml_source):
+        """Parse worksheet XML from bytes or a file-like object."""
+        xml_stream = xml_source
+        if isinstance(xml_source, bytes):
+            xml_stream = io.BytesIO(xml_source)
         cdef object context = etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 'c')
         cdef object event
         cdef object cell
