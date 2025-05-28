@@ -1,14 +1,16 @@
 import os
 import timeit
 
+import sys
 import pytest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 try:
     from openpyxl import load_workbook as openpyxl_load_workbook
     HAS_OPENPYXL = True
-except Exception:
+except Exception:  # noqa: PIE786
     HAS_OPENPYXL = False
-    openpyxl_load_workbook = None
 
 from cytosheet import Workbook, load_workbook
 

@@ -23,8 +23,9 @@ First install the build requirements and compile the Cython extensions:
 ```
 pip install Cython lxml
 python src/setup.py build_ext --inplace
+
 export PYTHONPATH=$(pwd)/src
-```
+
 
 Optionally you can build a wheel distribution:
 
@@ -41,5 +42,18 @@ performance comparison tests also require the `openpyxl` package.
 pip install openpyxl pytest
 export PYTHONPATH=$(pwd)/src
 pytest
+=======
+
+After building the Cython extensions you can execute the test suite. Add the
+`src` directory to `PYTHONPATH` or install the package in editable mode:
+
 ```
+export PYTHONPATH=$(pwd)/src
+```
+
+Install `pytest` and (optionally) `openpyxl` for the performance comparison:
+
+```
+pip install pytest [openpyxl]
+
 
