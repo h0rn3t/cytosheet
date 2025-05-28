@@ -33,9 +33,6 @@ python -m build
 
 ### Running tests
 
-The test suite can be executed even without compiled extensions because
-Python fallbacks are included. For the performance comparison tests you
-will also need the optional `openpyxl` dependency.
 
 ```
 pip install openpyxl pytest
