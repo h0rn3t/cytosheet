@@ -1,7 +1,6 @@
 from zipfile import ZipFile
 
-# Use relative imports so the module works both when running from the source
-# tree and when installed as a package.
+
 from .workbook import Workbook
 from .worksheet import Worksheet
 
