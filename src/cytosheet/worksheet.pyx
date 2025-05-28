@@ -46,11 +46,9 @@ cdef class Worksheet:
         return c
 
 
-    cpdef void _parse_sheet(self, xml_source):
-        """Parse worksheet XML from bytes or a file-like object."""
-        xml_stream = xml_source
-        if isinstance(xml_source, bytes):
-            xml_stream = io.BytesIO(xml_source)
+    cpdef void _parse_sheet(self, bytes xml_data):
+        """Parse worksheet XML using iterparse for better performance."""
+        xml_stream = io.BytesIO(xml_data)
 
         cdef object context = etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 'c')
         cdef object event

@@ -1,6 +1,5 @@
 cdef class Cell:
-    cdef str position
-    cdef public object value
+    # attributes declared in cell.pxd
 
     def __init__(self, str position=None, object value=None):
         self.position = position
