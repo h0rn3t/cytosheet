@@ -35,18 +35,18 @@ cdef class Worksheet:
         # Устанавливаем значение ячейки
         self._cells[cell] = value
 
-    cpdef Cell cell(self, int row, int column, value=None):
+    cpdef cell(self, int row, int column, value=None):
         """Return or create a cell by numeric coordinates (openpyxl compatibility)."""
         cdef str col_letter = chr(ord('A') + column - 1)
         cdef str position = f"{col_letter}{row}"
-        cdef Cell c = self[position]
+        cdef object c = self[position]
         if value is not None:
             c.value = value
         return c
 
     cpdef void _parse_sheet(self, bytes xml_data):
         """Parse worksheet XML using iterparse for better performance."""
-        cdef io.BytesIO xml_stream = io.BytesIO(xml_data)
+        xml_stream = io.BytesIO(xml_data)
         cdef object context = etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 'c')
         cdef object event
         cdef object cell
