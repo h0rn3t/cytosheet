@@ -1,9 +1,10 @@
 README.md
 pyproject.toml
 src/cytosheet/__init__.py
+src/cytosheet/cell.pxd
 src/cytosheet.egg-info/PKG-INFO
 src/cytosheet.egg-info/SOURCES.txt
 src/cytosheet.egg-info/dependency_links.txt
 src/cytosheet.egg-info/requires.txt
 src/cytosheet.egg-info/top_level.txt
-tests/tests.py
+tests/test_cytosheet.py

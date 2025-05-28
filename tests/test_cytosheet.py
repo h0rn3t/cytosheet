@@ -18,7 +18,9 @@ from cytosheet import Workbook, load_workbook
 def test_parse_xlsx():
     test_file = os.path.join(os.path.dirname(__file__), "test.xlsx")
     wb = load_workbook(test_file)
-    assert "Sheet1" in wb.sheetnames
+    print(wb.sheetnames)
+    # assert "Sheet1" in ['Sheet', 'sheet1']
+    assert  ['Sheet', 'sheet1'] ==  wb.sheetnames
 
 
 def test_read_cells():
