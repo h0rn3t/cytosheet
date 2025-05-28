@@ -1,6 +1,10 @@
-from .cell import Cell
-from lxml import etree
 import io
+
+from lxml import etree
+
+from .cell import Cell
+
+NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
 cdef class Worksheet:
     cdef public dict _cells
@@ -31,34 +35,39 @@ cdef class Worksheet:
         # Устанавливаем значение ячейки
         self._cells[cell] = value
 
-    def _parse_sheet(self, bytes xml_data):
-        ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        xml_stream = io.BytesIO(xml_data)
-        context = etree.iterparse(
-            xml_stream,
-            events=('start', 'end'),
-            tag='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row'
-        )
-        for event, row in context:
-            if event == 'end':
-                row_num = row.attrib['r']
-                cells = row.findall('.//main:c', namespaces=ns)
+    cpdef Cell cell(self, int row, int column, value=None):
+        """Return or create a cell by numeric coordinates (openpyxl compatibility)."""
+        cdef str col_letter = chr(ord('A') + column - 1)
+        cdef str position = f"{col_letter}{row}"
+        cdef Cell c = self[position]
+        if value is not None:
+            c.value = value
+        return c
 
-                for cell in cells:
-                    col_ref = cell.attrib['r']
-                    cell_type = cell.attrib.get('t', None)
-                    value = None
-
-                    if cell_type == 's':
-                        shared_string_index = int(cell.find('main:v', namespaces=ns).text)
-                        if shared_string_index < len(self._shared_strings):
-                            value = self._shared_strings[shared_string_index]
-                    elif cell.find('main:v', namespaces=ns) is not None:
-                        value = str(cell.find('main:v', namespaces=ns).text)
-
-                    self._cells[col_ref] = Cell(value=value)
-
-                row.clear()
+    cpdef void _parse_sheet(self, bytes xml_data):
+        """Parse worksheet XML using iterparse for better performance."""
+        cdef io.BytesIO xml_stream = io.BytesIO(xml_data)
+        cdef object context = etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 'c')
+        cdef object event
+        cdef object cell
+        cdef str col_ref
+        cdef object value_elem
+        cdef object value
+        cdef int shared_string_index
+        cdef int ss_len = len(self._shared_strings)
+        for event, cell in context:
+            col_ref = cell.attrib['r']
+            cell_type = cell.attrib.get('t')
+            value = None
+            value_elem = cell.find(NS_MAIN + 'v')
+            if cell_type == 's' and value_elem is not None:
+                shared_string_index = int(value_elem.text)
+                if shared_string_index < ss_len:
+                    value = self._shared_strings[shared_string_index]
+            elif value_elem is not None:
+                value = str(value_elem.text)
+            self._cells[col_ref] = Cell(position=col_ref, value=value)
+            cell.clear()
 
     def get_xml_data(self) -> bytes:
         """
