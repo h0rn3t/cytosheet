@@ -2,7 +2,8 @@ import io
 
 from lxml import etree
 
-from .cell import Cell
+from .cell import Cell as PyCell
+from .cell cimport Cell
 
 NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
@@ -25,13 +26,13 @@ cdef class Worksheet:
         if key in self._cells:
             return self._cells[key]
         else:
-            self._cells[key] = Cell(position=key)
+            self._cells[key] = PyCell(position=key)
             return self._cells[key]
 
     def __setitem__(self, cell: str, value):
         # Создаем новую ячейку, если её ещё нет
         if cell not in self._cells:
-            self._cells[cell] = Cell(position=cell)
+            self._cells[cell] = PyCell(position=cell)
         # Устанавливаем значение ячейки
         self._cells[cell] = value
 
@@ -44,11 +45,13 @@ cdef class Worksheet:
             c.value = value
         return c
 
+
     cpdef void _parse_sheet(self, xml_source):
         """Parse worksheet XML from bytes or a file-like object."""
         xml_stream = xml_source
         if isinstance(xml_source, bytes):
             xml_stream = io.BytesIO(xml_source)
+
         cdef object context = etree.iterparse(xml_stream, events=('end',), tag=NS_MAIN + 'c')
         cdef object event
         cdef object cell
@@ -68,7 +71,7 @@ cdef class Worksheet:
                     value = self._shared_strings[shared_string_index]
             elif value_elem is not None:
                 value = str(value_elem.text)
-            self._cells[col_ref] = Cell(position=col_ref, value=value)
+            self._cells[col_ref] = PyCell(position=col_ref, value=value)
             cell.clear()
 
     def get_xml_data(self) -> bytes:
