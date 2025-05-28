@@ -27,3 +27,6 @@ repository = "https://github.com/yourusername/cytosheet"
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["cytosheet"]
+
+[tool.setuptools.package-data]
+"cytosheet" = ["*.pxd"]
