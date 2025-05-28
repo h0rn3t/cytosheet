@@ -3,11 +3,14 @@ import timeit
 
 import pytest
 
-# Skip tests that rely on openpyxl if the package isn't installed
-pytest.importorskip("openpyxl")
-from openpyxl import load_workbook as openpyxl_load_workbook
+try:
+    from openpyxl import load_workbook as openpyxl_load_workbook
+    HAS_OPENPYXL = True
+except Exception:
+    HAS_OPENPYXL = False
+    openpyxl_load_workbook = None
 
-from src.cytosheet import Workbook, load_workbook
+from cytosheet import Workbook, load_workbook
 
 
 def test_parse_xlsx():
@@ -26,12 +29,13 @@ def test_read_cells():
     cytosheet_time = timeit.default_timer() - start
     print(f"cytosheet Time: {cytosheet_time:.4f} seconds")
 
-    start = timeit.default_timer()
-    wb = openpyxl_load_workbook(test_file)
-    ws = wb["Sheet1"]
-    assert str(ws["A2"].value) == "1"
-    openpyxl_time = timeit.default_timer() - start
-    print(f"openpyxl Time: {openpyxl_time:.4f} seconds")
+    if HAS_OPENPYXL:
+        start = timeit.default_timer()
+        wb = openpyxl_load_workbook(test_file)
+        ws = wb["Sheet1"]
+        assert str(ws["A2"].value) == "1"
+        openpyxl_time = timeit.default_timer() - start
+        print(f"openpyxl Time: {openpyxl_time:.4f} seconds")
 
 
 def test_write_cells(tmp_path):

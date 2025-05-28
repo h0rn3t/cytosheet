@@ -18,13 +18,28 @@ Cytosheet is a PoC library for working with XLSX files, written in Cython.
 - lxml
 ### Install from source
 
-   pip install .
-   python -m build
-   python setup.py build_ext --inplace
+First install the build requirements and compile the Cython extensions:
+
+```
+pip install Cython lxml
+python src/setup.py build_ext --inplace
+export PYTHONPATH=$(pwd)/src
+```
+
+Optionally you can build a wheel distribution:
+
+```
+python -m build
+```
 
 ### Running tests
 
-Install `openpyxl` if you want to run the comparison tests and then execute:
+After building the Cython extensions you can run the test suite. The
+performance comparison tests also require the `openpyxl` package.
 
-   pytest
+```
+pip install openpyxl pytest
+export PYTHONPATH=$(pwd)/src
+pytest
+```
 
