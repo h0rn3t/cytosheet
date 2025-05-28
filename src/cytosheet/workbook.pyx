@@ -1,7 +1,9 @@
 import os
-from zipfile import ZipFile
-from lxml import etree
 from io import BytesIO
+from zipfile import ZipFile
+
+from lxml import etree
+
 from .worksheet import Worksheet
 
 # XML templates
@@ -62,15 +64,32 @@ cdef class Workbook:
             return lower_sheets[sheet_name_lower]
         raise KeyError(f"No sheet named '{sheet_name}' exists.")
 
+    def __getitem__(self, key: str):
+        """Return worksheet by name (openpyxl compatibility)."""
+        return self.get_sheet_by_name(key)
+
+    @property
+    def worksheets(self):
+        """Return list of worksheets (openpyxl compatibility)."""
+        return list(self._sheets.values())
+
+    def close(self):
+        """Release workbook resources (openpyxl compatibility)."""
+        self._sheets.clear()
+        self._shared_strings.clear()
+
     cpdef void _parse_shared_strings(self, bytes xml_data):
         """
         Parses shared strings from the sharedStrings.xml file and stores them
         in the shared strings list.
         """
-        root = etree.fromstring(xml_data)
-        strings = root.xpath('//si')
+        cdef object root = etree.fromstring(xml_data)
+        cdef list strings = root.xpath('//si')
+        cdef object s
+        cdef str text
         for s in strings:
-            self._shared_strings.append(s.xpath('string(.)')[0])
+            text = s.xpath('string(.)')[0]
+            self._shared_strings.append(text)
 
     def create_sheet(self, title: str = None):
         """

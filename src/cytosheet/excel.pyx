@@ -2,7 +2,8 @@ from zipfile import ZipFile
 
 from src.cytosheet import Workbook, Worksheet
 
-def load_workbook(filename: str):
+
+def load_workbook(filename: str, read_only: bool=False):
     """
     Loads a workbook from an Excel file (.xlsx) and parses shared strings
     and worksheets.
