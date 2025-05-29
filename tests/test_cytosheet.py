@@ -57,3 +57,20 @@ def test_write_cells(tmp_path):
     ws2 = wb2.active
     assert ws2["A1"].value == "Hello"
     assert ws2["B2"].value == "World"
+
+
+def test_merge_and_formula(tmp_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.merge_cells("A1:B2")
+    ws["A1"].value = "Test"
+    ws["A1"].formula = "=SUM(1,1)"
+
+    file_path = tmp_path / "merge_formula.xlsx"
+    wb.save(str(file_path))
+
+    wb2 = load_workbook(str(file_path))
+    ws2 = wb2.active
+    assert "A1:B2" in ws2.merged_cells
+    assert ws2["A1"].value == "Test"
+    assert ws2["A1"].formula == "=SUM(1,1)"
