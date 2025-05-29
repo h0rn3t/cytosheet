@@ -4,6 +4,8 @@ from zipfile import ZipFile
 
 from lxml import etree
 
+NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+
 from .worksheet import Worksheet
 
 # XML templates
@@ -79,17 +81,17 @@ cdef class Workbook:
         self._shared_strings.clear()
 
     cpdef void _parse_shared_strings(self, bytes xml_data):
-        """
-        Parses shared strings from the sharedStrings.xml file and stores them
-        in the shared strings list.
-        """
-        cdef object root = etree.fromstring(xml_data)
-        cdef list strings = root.xpath('//si')
-        cdef object s
+        """Parse shared strings XML using a single ``iterparse`` loop."""
+        cdef object context = etree.iterparse(BytesIO(xml_data),
+                                             events=('end',),
+                                             tag=NS_MAIN + 'si')
+        cdef object event
+        cdef object elem
         cdef str text
-        for s in strings:
-            text = s.xpath('string(.)')[0]
+        for event, elem in context:
+            text = ''.join(elem.itertext())
             self._shared_strings.append(text)
+            elem.clear()
 
     def create_sheet(self, title: str = None):
         """

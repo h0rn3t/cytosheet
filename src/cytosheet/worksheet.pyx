@@ -32,10 +32,10 @@ cdef class Worksheet:
             return self._cells[key]
 
     def __setitem__(self, cell: str, value):
-        # Створюємо нову комірку, якщо її ще немає
+        # Создаем новую ячейку, если её ещё нет
         if cell not in self._cells:
             self._cells[cell] = PyCell(position=cell)
-        # Встановлюємо значення комірки
+        # Устанавливаем значение ячейки
         self._cells[cell] = value
 
     def merge_cells(self, range_string: str):
@@ -59,63 +59,58 @@ cdef class Worksheet:
 
 
     cpdef void _parse_sheet(self, bytes xml_data):
-        """Parse worksheet XML using iterparse for better performance."""
-        cdef object root
-        cdef object context
+        """Parse worksheet XML using a single ``iterparse`` loop."""
+        cdef object context = etree.iterparse(
+            io.BytesIO(xml_data),
+            events=('end',),
+            tag=(NS_MAIN + 'c', NS_MAIN + 'mergeCell'),
+        )
         cdef object event
-        cdef object cell
+        cdef object elem
         cdef str col_ref
         cdef object value_elem
         cdef object formula_elem
         cdef object value
         cdef object style_id
+        cdef str ref
         cdef int shared_string_index
-        cdef int ss_len
-
-        xml_stream = io.BytesIO(xml_data)
-
-        root = etree.fromstring(xml_data)
-        for m in root.findall('.//' + NS_MAIN + 'mergeCell'):
-            ref = m.attrib.get('ref')
-            if ref:
-                self._merged_cells.add(ref)
-
-        context = etree.iterparse(io.BytesIO(xml_data), events=('end',), tag=NS_MAIN + 'c')
-        ss_len = len(self._shared_strings)
-        for event, cell in context:
-            col_ref = cell.attrib['r']
-            cell_type = cell.attrib.get('t')
-            value = None
-            value_elem = cell.find(NS_MAIN + 'v')
-            formula_elem = cell.find(NS_MAIN + 'f')
-            style_id = cell.attrib.get('s')
-            if cell_type == 's' and value_elem is not None:
-                shared_string_index = int(value_elem.text)
-                if shared_string_index < ss_len:
-                    value = self._shared_strings[shared_string_index]
-            elif value_elem is not None:
-                value = str(value_elem.text)
-            self._cells[col_ref] = PyCell(
-                position=col_ref,
-                value=value,
-                formula=formula_elem.text if formula_elem is not None else None,
-                style_id=style_id,
-            )
-            cell.clear()
+        cdef int ss_len = len(self._shared_strings)
+        for event, elem in context:
+            if elem.tag == NS_MAIN + 'mergeCell':
+                ref = elem.attrib.get('ref')
+                if ref:
+                    self._merged_cells.add(ref)
+            else:
+                col_ref = elem.attrib['r']
+                cell_type = elem.attrib.get('t')
+                value = None
+                value_elem = elem.find(NS_MAIN + 'v')
+                formula_elem = elem.find(NS_MAIN + 'f')
+                style_id = elem.attrib.get('s')
+                if cell_type == 's' and value_elem is not None:
+                    shared_string_index = int(value_elem.text)
+                    if shared_string_index < ss_len:
+                        value = self._shared_strings[shared_string_index]
+                elif value_elem is not None:
+                    value = str(value_elem.text)
+                self._cells[col_ref] = PyCell(
+                    position=col_ref,
+                    value=value,
+                    formula=formula_elem.text if formula_elem is not None else None,
+                    style_id=style_id,
+                )
+            elem.clear()
 
     def get_xml_data(self) -> bytes:
         """
         Generates XML data for the worksheet.
         :return:
         """
+        rows_data = {}
         cdef object cell
         cdef str cell_position
         cdef int row
         cdef str column
-        cdef list parts
-        cdef str style_attr
-        rows_data = {}
-
         for cell_position, cell in self._cells.items():
             if cell.value is not None or cell.formula is not None:
                 column, row = cell_position[0], int(cell_position[1:])
@@ -126,12 +121,12 @@ cdef class Worksheet:
                     parts.append(f'<f>{cell.formula}</f>')
                 if cell.value is not None:
                     parts.append(f'<v>{cell.value}</v>')
-                style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
+                cdef str style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
                 rows_data[row].append(
                     f'<c r="{cell_position}"{style_attr} t="str">{"".join(parts)}</c>'
                 )
 
-        # Генеруємо рядки XML з кожним рядком, що містить свої комірки
+        # Генерируем строки XML с каждой строкой, содержащей свои ячейки
         rows_xml = [
             f'<row r="{row}">{" ".join(cells)}</row>'
             for row, cells in sorted(rows_data.items())
