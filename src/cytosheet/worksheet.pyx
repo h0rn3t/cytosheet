@@ -32,10 +32,10 @@ cdef class Worksheet:
             return self._cells[key]
 
     def __setitem__(self, cell: str, value):
-        # Создаем новую ячейку, если её ещё нет
+        # Створюємо нову комірку, якщо її ще немає
         if cell not in self._cells:
             self._cells[cell] = PyCell(position=cell)
-        # Устанавливаем значение ячейки
+        # Встановлюємо значення комірки
         self._cells[cell] = value
 
     def merge_cells(self, range_string: str):
@@ -60,15 +60,8 @@ cdef class Worksheet:
 
     cpdef void _parse_sheet(self, bytes xml_data):
         """Parse worksheet XML using iterparse for better performance."""
-        xml_stream = io.BytesIO(xml_data)
-
-        cdef object root = etree.fromstring(xml_data)
-        for m in root.findall('.//' + NS_MAIN + 'mergeCell'):
-            ref = m.attrib.get('ref')
-            if ref:
-                self._merged_cells.add(ref)
-
-        cdef object context = etree.iterparse(io.BytesIO(xml_data), events=('end',), tag=NS_MAIN + 'c')
+        cdef object root
+        cdef object context
         cdef object event
         cdef object cell
         cdef str col_ref
@@ -77,7 +70,18 @@ cdef class Worksheet:
         cdef object value
         cdef object style_id
         cdef int shared_string_index
-        cdef int ss_len = len(self._shared_strings)
+        cdef int ss_len
+
+        xml_stream = io.BytesIO(xml_data)
+
+        root = etree.fromstring(xml_data)
+        for m in root.findall('.//' + NS_MAIN + 'mergeCell'):
+            ref = m.attrib.get('ref')
+            if ref:
+                self._merged_cells.add(ref)
+
+        context = etree.iterparse(io.BytesIO(xml_data), events=('end',), tag=NS_MAIN + 'c')
+        ss_len = len(self._shared_strings)
         for event, cell in context:
             col_ref = cell.attrib['r']
             cell_type = cell.attrib.get('t')
@@ -104,27 +108,30 @@ cdef class Worksheet:
         Generates XML data for the worksheet.
         :return:
         """
-        rows_data = {}
         cdef object cell
         cdef str cell_position
         cdef int row
         cdef str column
+        cdef list parts
+        cdef str style_attr
+        rows_data = {}
+
         for cell_position, cell in self._cells.items():
             if cell.value is not None or cell.formula is not None:
                 column, row = cell_position[0], int(cell_position[1:])
                 if row not in rows_data:
                     rows_data[row] = []
-                cdef list parts = []
+                parts = []
                 if cell.formula is not None:
                     parts.append(f'<f>{cell.formula}</f>')
                 if cell.value is not None:
                     parts.append(f'<v>{cell.value}</v>')
-                cdef str style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
+                style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
                 rows_data[row].append(
                     f'<c r="{cell_position}"{style_attr} t="str">{"".join(parts)}</c>'
                 )
 
-        # Генерируем строки XML с каждой строкой, содержащей свои ячейки
+        # Генеруємо рядки XML з кожним рядком, що містить свої комірки
         rows_xml = [
             f'<row r="{row}">{" ".join(cells)}</row>'
             for row, cells in sorted(rows_data.items())
