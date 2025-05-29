@@ -32,10 +32,10 @@ cdef class Worksheet:
             return self._cells[key]
 
     def __setitem__(self, cell: str, value):
-        # Создаем новую ячейку, если её ещё нет
+        # Створюємо нову комірку, якщо її ще немає
         if cell not in self._cells:
             self._cells[cell] = PyCell(position=cell)
-        # Устанавливаем значение ячейки
+        # Встановлюємо значення комірки
         self._cells[cell] = value
 
     def merge_cells(self, range_string: str):
@@ -131,7 +131,7 @@ cdef class Worksheet:
                     f'<c r="{cell_position}"{style_attr} t="str">{"".join(parts)}</c>'
                 )
 
-        # Генерируем строки XML с каждой строкой, содержащей свои ячейки
+        # Генеруємо рядки XML з кожним рядком, що містить свої комірки
         rows_xml = [
             f'<row r="{row}">{" ".join(cells)}</row>'
             for row, cells in sorted(rows_data.items())
