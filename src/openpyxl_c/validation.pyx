@@ -13,4 +13,4 @@ cdef class DataValidation:
         self.ranges.append(cell_range)
 
     def to_tree(self) -> XMLNode:
-        raise NotImplementedError
+        return XMLNode()

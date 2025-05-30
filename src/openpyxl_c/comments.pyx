@@ -7,4 +7,5 @@ cdef class Comment:
         self.author = author
 
     def to_tree(self) -> XMLNode:
-        raise NotImplementedError
+        return XMLNode()
+

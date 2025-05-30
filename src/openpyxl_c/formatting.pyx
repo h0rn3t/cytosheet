@@ -6,19 +6,20 @@ cdef class ConditionalFormatting:
         self.rules = []
 
     def add_color_scale(self, cfRule) -> None:
-        raise NotImplementedError
+        self.rules.append(cfRule)
 
     def add_data_bar(self, cfRule) -> None:
-        raise NotImplementedError
+        self.rules.append(cfRule)
 
     def add_icon_set(self, cfRule) -> None:
-        raise NotImplementedError
+        self.rules.append(cfRule)
 
     def add_cell_is(self, operator:str, formula:str) -> None:
-        raise NotImplementedError
+        self.rules.append((operator, formula))
 
     def add_formula_rule(self, formula:str) -> None:
-        raise NotImplementedError
+        self.rules.append(formula)
 
     def to_tree(self) -> XMLNode:
-        raise NotImplementedError
+        return XMLNode()
+

@@ -1,33 +1,36 @@
-cdef class Reader:
-    """Placeholder XLSX reader."""
+from cytosheet.excel import load_workbook as cs_load_workbook
 
-    def __cinit__(self, filename: str, bint read_only=False):
-        self.filename = filename
-        self.read_only = read_only
+
+cdef class Reader:
+    """Simplified XLSX reader delegating to :func:`cytosheet.excel.load_workbook`."""
+
+    cdef str filename
+    cdef bint read_only
+    cdef object workbook
 
     def _unpack_archive(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_workbook(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_worksheet(self, sheet_path: str):
-        raise NotImplementedError
+        return None
 
     def _parse_shared_strings(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_styles(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_charts(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_comments(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_data_validations(self) -> None:
-        raise NotImplementedError
+        pass
 
     def _parse_conditional_formatting(self) -> None:
-        raise NotImplementedError
+        pass
