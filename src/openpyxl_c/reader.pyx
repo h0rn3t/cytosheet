@@ -8,11 +8,6 @@ cdef class Reader:
     cdef bint read_only
     cdef object workbook
 
-    def __cinit__(self, filename: str, bint read_only=False):
-        self.filename = filename
-        self.read_only = read_only
-        self.workbook = cs_load_workbook(filename, read_only)
-
     def _unpack_archive(self) -> None:
         pass
 

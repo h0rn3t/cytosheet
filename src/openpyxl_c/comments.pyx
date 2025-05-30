@@ -8,3 +8,4 @@ cdef class Comment:
 
     def to_tree(self) -> XMLNode:
         return XMLNode()
+

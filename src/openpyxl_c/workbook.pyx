@@ -45,3 +45,4 @@ cdef class Workbook:
     def __iter__(self):
         for name in self.sheetnames:
             yield self[name]
+

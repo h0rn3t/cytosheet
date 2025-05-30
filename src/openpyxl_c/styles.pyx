@@ -31,3 +31,4 @@ cdef class Protection:
     def __cinit__(self, locked:bint=True, hidden:bint=False):
         self.locked = locked
         self.hidden = hidden
+

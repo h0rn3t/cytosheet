@@ -81,3 +81,4 @@ cdef class Cell:
 
     def offset(self, int row_offset, int col_offset):
         return self.parent.cell(self.row + row_offset, self.column + col_offset)
+

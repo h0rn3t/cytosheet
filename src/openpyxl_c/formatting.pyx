@@ -22,3 +22,4 @@ cdef class ConditionalFormatting:
 
     def to_tree(self) -> XMLNode:
         return XMLNode()
+

@@ -73,14 +73,5 @@ cdef class Worksheet:
     def title(self, value: str) -> None:
         self._title = value
 
-    @property
-    def sheet_properties(self):
-        return None
 
-    @property
-    def page_setup(self):
-        return None
 
-    @property
-    def print_options(self):
-        return None

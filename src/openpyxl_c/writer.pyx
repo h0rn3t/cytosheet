@@ -1,6 +1,7 @@
 cdef class Writer:
     """Simplified XLSX writer delegating to :mod:`cytosheet`."""
 
+
     def __cinit__(self, workbook, filename: str):
         self.workbook = workbook
         self.filename = filename
