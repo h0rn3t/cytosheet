@@ -74,3 +74,31 @@ def test_merge_and_formula(tmp_path):
     assert "A1:B2" in ws2.merged_cells
     assert ws2["A1"].value == "Test"
     assert ws2["A1"].formula == "=SUM(1,1)"
+
+
+def test_append_and_max():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["A", "B", "C"])
+    ws.append([1, 2, 3])
+    assert ws.max_row == 2
+    assert ws.max_column == 3
+    assert ws["A2"].value == 1
+    assert ws["C1"].value == "C"
+
+
+def test_iter_rows_and_cols():
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"].value = "A1"
+    ws["B1"].value = "B1"
+    ws["A2"].value = "A2"
+    ws["B2"].value = "B2"
+
+    rows = list(ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=2))
+    assert rows[0][0].value == "A1"
+    assert rows[1][1].value == "B2"
+
+    cols = list(ws.iter_cols(min_col=1, max_col=2, min_row=1, max_row=2))
+    assert cols[0][1].value == "A2"
+    assert cols[1][0].value == "B1"
