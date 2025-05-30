@@ -111,6 +111,7 @@ cdef class Worksheet:
         cdef str cell_position
         cdef int row
         cdef str column
+        cdef str style_attr
         for cell_position, cell in self._cells.items():
             if cell.value is not None or cell.formula is not None:
                 column, row = cell_position[0], int(cell_position[1:])
@@ -121,7 +122,7 @@ cdef class Worksheet:
                     parts.append(f'<f>{cell.formula}</f>')
                 if cell.value is not None:
                     parts.append(f'<v>{cell.value}</v>')
-                cdef str style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
+                style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
                 rows_data[row].append(
                     f'<c r="{cell_position}"{style_attr} t="str">{"".join(parts)}</c>'
                 )
