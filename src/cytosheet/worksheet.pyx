@@ -111,6 +111,7 @@ cdef class Worksheet:
         cdef str cell_position
         cdef int row
         cdef str column
+        cdef str style_attr
         for cell_position, cell in self._cells.items():
             if cell.value is not None or cell.formula is not None:
                 column, row = cell_position[0], int(cell_position[1:])
@@ -121,7 +122,7 @@ cdef class Worksheet:
                     parts.append(f'<f>{cell.formula}</f>')
                 if cell.value is not None:
                     parts.append(f'<v>{cell.value}</v>')
-                cdef str style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
+                style_attr = f' s="{cell.style_id}"' if cell.style_id is not None else ''
                 rows_data[row].append(
                     f'<c r="{cell_position}"{style_attr} t="str">{"".join(parts)}</c>'
                 )
@@ -145,3 +146,93 @@ cdef class Worksheet:
         </worksheet>"""
 
         return xml_content.encode('utf-8')
+
+    # ------------------------------------------------------------------
+    # Additional openpyxl-like helpers
+
+    cdef str _column_letter(int idx):
+        """Convert a 1-based column index to its Excel column letter."""
+        cdef list letters = []
+        cdef int num = idx
+        while num > 0:
+            num -= 1
+            letters.append(chr(num % 26 + ord('A')))
+            num //= 26
+        letters.reverse()
+        return "".join(letters)
+
+    cdef int _column_index_from_key(str key):
+        """Extract 1-based column index from cell key like 'A1'."""
+        cdef int i = 0
+        cdef int result = 0
+        cdef str ch
+        for ch in key:
+            if ch.isalpha():
+                result = result * 26 + (ord(ch.upper()) - ord('A') + 1)
+                i += 1
+            else:
+                break
+        return result
+
+    cdef int _row_index_from_key(str key):
+        """Extract row index from cell key like 'A1'."""
+        cdef int i = 0
+        for i in range(len(key)):
+            if not key[i].isalpha():
+                break
+        if i < len(key):
+            return int(key[i:])
+        return 0
+
+    @property
+    def max_row(self):
+        """Return the maximum row index that contains data."""
+        if not self._cells:
+            return 0
+        return max(self._row_index_from_key(k) for k in self._cells.keys())
+
+    @property
+    def max_column(self):
+        """Return the maximum column index that contains data."""
+        if not self._cells:
+            return 0
+        return max(self._column_index_from_key(k) for k in self._cells.keys())
+
+    cpdef append(self, list values):
+        """Append a list of values to the next available row."""
+        cdef int row_idx = self.max_row + 1
+        cdef int col_idx
+        cdef str col_letter
+        cdef object cell
+        for col_idx, value in enumerate(values, start=1):
+            col_letter = self._column_letter(col_idx)
+            cell = self[f"{col_letter}{row_idx}"]
+            cell.value = value
+
+    cpdef iter_rows(self, int min_row=1, int max_row=None, int min_col=1, int max_col=None):
+        """Yield rows of cells from the worksheet."""
+        if max_row is None:
+            max_row = self.max_row
+        if max_col is None:
+            max_col = self.max_column
+        cdef int row
+        cdef int col
+        for row in range(min_row, max_row + 1):
+            cdef list row_cells = []
+            for col in range(min_col, max_col + 1):
+                row_cells.append(self.cell(row, col))
+            yield row_cells
+
+    cpdef iter_cols(self, int min_col=1, int max_col=None, int min_row=1, int max_row=None):
+        """Yield columns of cells from the worksheet."""
+        if max_col is None:
+            max_col = self.max_column
+        if max_row is None:
+            max_row = self.max_row
+        cdef int col
+        cdef int row
+        for col in range(min_col, max_col + 1):
+            cdef list col_cells = []
+            for row in range(min_row, max_row + 1):
+                col_cells.append(self.cell(row, col))
+            yield col_cells
