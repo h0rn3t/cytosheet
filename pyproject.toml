@@ -26,7 +26,8 @@ repository = "https://github.com/yourusername/cytosheet"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["cytosheet"]
+packages = ["cytosheet", "openpyxl_c"]
 
 [tool.setuptools.package-data]
 "cytosheet" = ["*.pxd"]
+"openpyxl_c" = ["*.pxd"]

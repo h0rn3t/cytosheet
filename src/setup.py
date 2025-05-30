@@ -4,10 +4,9 @@ from setuptools import setup
 setup(
     ext_modules=cythonize(
         [
-            "cytosheet/cell.pyx",
-            "cytosheet/workbook.pyx",
-            "cytosheet/worksheet.pyx",
-            "cytosheet/excel.pyx",
+            "cytosheet/*.pyx",
+            "openpyxl_c/*.pyx",
+            "openpyxl_c/chart/*.pyx",
         ],
         compiler_directives={"language_level": "3"},
     ),

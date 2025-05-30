@@ -43,12 +43,9 @@ export PYTHONPATH=$(pwd)/src
 
 Install `pytest` and (optionally) `openpyxl` for the performance comparison:
 
-```
-pip install pytest [openpyxl]
-=======
-
-```
-pip install openpyxl pytest
-
+```bash
+pip install pytest
+# Optional dependency for performance comparison
+pip install openpyxl
 ```
 
