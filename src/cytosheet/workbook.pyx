@@ -33,8 +33,10 @@ cdef class Workbook:
     cdef public dict _sheets
     cdef public list _shared_strings
     cdef public int _active_sheet_index
+    cdef public bint _lazy
+    cdef public object _archive  # ZipFile | None
 
-    def __init__(self, str sheet_name=None):
+    def __init__(self, str sheet_name=None, object _archive=None, bint lazy=False):
         """
         Initializes a new Workbook instance with an empty sheet dictionary,
         shared strings list, and default active sheet.
@@ -42,6 +44,31 @@ cdef class Workbook:
         self._sheets = {}
         self._shared_strings = []
         self._active_sheet_index = 0
+        self._archive = _archive
+        self._lazy = lazy
+
+        if self._archive is not None:
+            from lxml import etree
+            if "xl/sharedStrings.xml" in self._archive.namelist():
+                xml = self._archive.read("xl/sharedStrings.xml")
+                self._parse_shared_strings(xml)
+
+            from src.cytosheet import Worksheet
+            for sheet_path in sorted(
+                p for p in self._archive.namelist()
+                if p.startswith("xl/worksheets/") and p.endswith(".xml")
+            ):
+                name = sheet_path.rsplit("/", 1)[-1].replace(".xml", "")
+                ws = Worksheet(
+                    self._shared_strings,
+                    name,  # title
+                    self._archive,  # archive
+                    sheet_path,  # sheet_path
+                    not lazy  # preload
+                )
+                self._sheets[name] = ws
+            return
+
         self._add_sheet(sheet_name)
 
     def _add_sheet(self, sheet_name: str | None):
@@ -194,3 +221,7 @@ cdef class Workbook:
     @property
     def sheets(self):
         return self._sheets
+
+    def close(self):
+        if self._archive is not None:
+            self._archive.close()

@@ -25,7 +25,7 @@ def test_read_cells():
     start = timeit.default_timer()
     wb = load_workbook(test_file)
     ws = wb.get_sheet_by_name('Sheet1')
-    assert ws['A2'].value == '1'  # Приведение типов, если нужно
+    assert ws['A2'].value == 1  # Приведение типов, если нужно
     stop = timeit.default_timer()
     cytosheet_time = stop - start
     print(f'\ncytosheet Time: {cytosheet_time:.4f} seconds')
@@ -68,3 +68,44 @@ def test_write_cells():
 
     # Удаляем файл после теста
     os.remove(file_path)
+
+
+def test_numeric_cells():
+    wb = Workbook()
+    ws = wb.active
+
+    ws['A1'] = 42
+    ws['B1'] = 3.14
+    ws['C1'] = 'text'
+
+    file_path = os.path.join(os.path.dirname(__file__), 'numeric_test.xlsx')
+    wb.save(file_path)
+
+    wb2 = load_workbook(file_path)
+    ws2 = wb2.active
+
+    assert ws2['A1'].value == 42
+    assert ws2['B1'].value == 3.14
+    assert ws2['C1'].value == 'text'
+
+    os.remove(file_path)
+
+
+# Потоковое чтение строк (lazy=True) без загрузки листа целиком.
+def test_lazy_iter_rows():
+    """Потоковое чтение строк (lazy=True) без загрузки листа целиком."""
+    test_file = os.path.join(os.path.dirname(__file__),
+                             'file_example_XLSX_5000.xlsx')
+
+    wb = load_workbook(test_file, lazy=True)   # новый режим
+    ws = wb.get_sheet_by_name('Sheet1')
+
+    rows = ws.iter_rows(values_only=True)
+
+    header = next(rows)            # первая строка – заголовок
+    data   = next(rows)            # вторая – реальные данные
+
+    # В файле примерного набора значение 1 находится в A2
+    assert data[0] == 1
+
+    wb.close()
