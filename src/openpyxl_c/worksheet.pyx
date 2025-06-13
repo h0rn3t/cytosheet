@@ -1,4 +1,4 @@
-from cytosheet.worksheet import Worksheet as CSWorksheet
+from cytosheet.worksheet cimport Worksheet as CSWorksheet
 from .cell import Cell
 
 
@@ -15,7 +15,7 @@ cdef class Worksheet:
         self._title = title
 
     @classmethod
-    cdef Worksheet _wrap(cls, parent, CSWorksheet cs_ws):
+    def _wrap(cls, parent, CSWorksheet cs_ws):
         obj = cls.__new__(cls)
         obj.parent = parent
         obj._ws = cs_ws
@@ -32,7 +32,7 @@ cdef class Worksheet:
         c_cell = self._ws.cell(row, column, value)
         return Cell._wrap(self, c_cell, row, column)
 
-    def iter_rows(self, int min_row=1, int max_row=None, int min_col=1, int max_col=None):
+    def iter_rows(self, int min_row=1, max_row=None, int min_col=1, max_col=None):
         for row in self._ws.iter_rows(min_row=min_row, max_row=max_row,
                                       min_col=min_col, max_col=max_col):
             yield tuple(
@@ -41,7 +41,7 @@ cdef class Worksheet:
                 for c in row
             )
 
-    def iter_cols(self, int min_col=1, int max_col=None, int min_row=1, int max_row=None):
+    def iter_cols(self, int min_col=1, max_col=None, int min_row=1, max_row=None):
         for col in self._ws.iter_cols(min_col=min_col, max_col=max_col,
                                       min_row=min_row, max_row=max_row):
             yield tuple(

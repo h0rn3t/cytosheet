@@ -8,11 +8,11 @@ from .cell cimport Cell
 NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
 cdef class Worksheet:
-    cdef public dict _cells
-    cdef public str title
-    cdef public list _shared_strings
-    cdef public dict _data
-    cdef public set _merged_cells
+    # cdef public dict _cells
+    # cdef public str title
+    # cdef public list _shared_strings
+    # cdef public dict _data
+    # cdef public set _merged_cells
 
 
     def __init__(self, list shared_strings=None, str title="Sheet"):
@@ -48,7 +48,7 @@ cdef class Worksheet:
     def merged_cells(self):
         return self._merged_cells
 
-    cpdef cell(self, int row, int column, value=None):
+    cpdef Cell cell(self, int row, int column, object value=None):
         """Return or create a cell by numeric coordinates (openpyxl compatibility)."""
         cdef str col_letter = chr(ord('A') + column - 1)
         cdef str position = f"{col_letter}{row}"
@@ -150,7 +150,7 @@ cdef class Worksheet:
     # ------------------------------------------------------------------
     # Additional openpyxl-like helpers
 
-    cdef str _column_letter(int idx):
+    cdef str _column_letter(self, int idx):
         """Convert a 1-based column index to its Excel column letter."""
         cdef list letters = []
         cdef int num = idx
@@ -161,7 +161,7 @@ cdef class Worksheet:
         letters.reverse()
         return "".join(letters)
 
-    cdef int _column_index_from_key(str key):
+    cdef int _column_index_from_key(self, str key):
         """Extract 1-based column index from cell key like 'A1'."""
         cdef int i = 0
         cdef int result = 0
@@ -174,7 +174,7 @@ cdef class Worksheet:
                 break
         return result
 
-    cdef int _row_index_from_key(str key):
+    cdef int _row_index_from_key(self, str key):
         """Extract row index from cell key like 'A1'."""
         cdef int i = 0
         for i in range(len(key)):
@@ -209,30 +209,67 @@ cdef class Worksheet:
             cell = self[f"{col_letter}{row_idx}"]
             cell.value = value
 
-    cpdef iter_rows(self, int min_row=1, int max_row=None, int min_col=1, int max_col=None):
-        """Yield rows of cells from the worksheet."""
-        if max_row is None:
-            max_row = self.max_row
-        if max_col is None:
-            max_col = self.max_column
-        cdef int row
-        cdef int col
-        for row in range(min_row, max_row + 1):
-            cdef list row_cells = []
-            for col in range(min_col, max_col + 1):
-                row_cells.append(self.cell(row, col))
-            yield row_cells
+    # cpdef iter_rows(self, int min_row=1, int max_row=None, int min_col=1, int max_col=None):
+    #     """Yield rows of cells from the worksheet."""
+    #     if max_row is None:
+    #         max_row = self.max_row
+    #     if max_col is None:
+    #         max_col = self.max_column
+    #     cdef int row
+    #     cdef int col
+    #     cdef list row_cells = []
+    #     for row in range(min_row, max_row + 1):
+    #         row_cells = []
+    #         for col in range(min_col, max_col + 1):
+    #             row_cells.append(self.cell(row, col))
+    #         yield row_cells
 
-    cpdef iter_cols(self, int min_col=1, int max_col=None, int min_row=1, int max_row=None):
-        """Yield columns of cells from the worksheet."""
-        if max_col is None:
-            max_col = self.max_column
-        if max_row is None:
-            max_row = self.max_row
+    cdef list get_row_cells(self, int row, int min_col, int max_col):
+        cdef list result = []
         cdef int col
-        cdef int row
         for col in range(min_col, max_col + 1):
-            cdef list col_cells = []
-            for row in range(min_row, max_row + 1):
-                col_cells.append(self.cell(row, col))
-            yield col_cells
+            result.append(self.cell(row, col, None))
+        return result
+
+    def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None):
+        """Yield rows of cells from the worksheet."""
+        cdef int row, col
+        cdef int _min_row = min_row
+        cdef int _max_row = self.max_row if max_row is None else max_row
+        cdef int _min_col = min_col
+        cdef int _max_col = self.max_column if max_col is None else max_col
+
+        for row in range(_min_row, _max_row + 1):
+            yield self.get_row_cells(row, _min_col, _max_col)
+
+    # cpdef iter_cols(self, int min_col=1, int max_col=None, int min_row=1, int max_row=None):
+    #     """Yield columns of cells from the worksheet."""
+    #     if max_col is None:
+    #         max_col = self.max_column
+    #     if max_row is None:
+    #         max_row = self.max_row
+    #     cdef int col
+    #     cdef int row
+    #     for col in range(min_col, max_col + 1):
+    #         cdef list col_cells = []
+    #         for row in range(min_row, max_row + 1):
+    #             col_cells.append(self.cell(row, col))
+    #         yield col_cells
+
+    cdef list get_col_cells(self, int col, int min_row, int max_row):
+        cdef list result = []
+        cdef int row
+        for row in range(min_row, max_row + 1):
+            result.append(self.cell(row, col, None))
+        return result
+
+    def iter_cols(self, min_col=1, max_col=None, min_row=1, max_row=None):
+        """Yield columns of cells from the worksheet."""
+        cdef int row, col
+        cdef int _min_col = min_col
+        cdef int _max_col = self.max_column if max_col is None else max_col
+        cdef int _min_row = min_row
+        cdef int _max_row = self.max_row if max_row is None else max_row
+
+        for col in range(_min_col, _max_col + 1):
+            yield self.get_col_cells(col, _min_row, _max_row)

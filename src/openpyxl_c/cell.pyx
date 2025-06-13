@@ -1,4 +1,4 @@
-from cytosheet.cell import Cell as CSCell
+from cytosheet.cell cimport Cell as CSCell
 
 
 cdef class Cell:
@@ -16,12 +16,12 @@ cdef class Cell:
         self._cell = parent._ws.cell(row, column, value)
 
     @classmethod
-    cdef Cell _wrap(cls, parent, CSCell cs, int row, int column):
-        obj = cls.__new__(cls)
+    def _wrap(cls, parent, CSCell cs, int row, int column):
+        cdef Cell obj = cls.__new__(cls)
         obj.parent = parent
+        obj._cell = cs
         obj.row = row
         obj.column = column
-        obj._cell = cs
         return obj
 
     @property

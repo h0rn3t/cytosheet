@@ -1,4 +1,5 @@
-from cytosheet import Workbook as CSWorkbook, load_workbook as cs_load_workbook
+from cytosheet import load_workbook as cs_load_workbook
+from cytosheet.workbook cimport Workbook as CSWorkbook
 from .worksheet import Worksheet
 
 

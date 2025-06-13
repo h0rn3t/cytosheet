@@ -34,9 +34,9 @@ MAIN_RELATIONSHIPS_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standa
 </Relationships>"""
 
 cdef class Workbook:
-    cdef public dict _sheets
-    cdef public list _shared_strings
-    cdef public int _active_sheet_index
+    # cdef public dict _sheets
+    # cdef public list _shared_strings
+    # cdef public int _active_sheet_index
 
     def __init__(self, str sheet_name=None):
         """
