@@ -4,14 +4,14 @@ from lxml import etree
 from io import BytesIO
 from .worksheet import Worksheet
 
-# XML templates
-WORKBOOK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+# XML templates - делаем их константами на уровне модуля для производительности
+cdef str WORKBOOK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
     <sheets>{sheets}</sheets>
 </workbook>"""
 
-CONTENT_TYPES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+cdef str CONTENT_TYPES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
     <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
     <Default Extension="xml" ContentType="application/xml"/>
@@ -19,12 +19,12 @@ CONTENT_TYPES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone=
     {sheet_overrides}
 </Types>"""
 
-RELATIONSHIPS_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+cdef str RELATIONSHIPS_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
     {relationships}
 </Relationships>"""
 
-MAIN_RELATIONSHIPS_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+cdef str MAIN_RELATIONSHIPS_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
     <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
 </Relationships>"""
@@ -48,64 +48,90 @@ cdef class Workbook:
         self._lazy = lazy
 
         if self._archive is not None:
-            from lxml import etree
-            if "xl/sharedStrings.xml" in self._archive.namelist():
-                xml = self._archive.read("xl/sharedStrings.xml")
-                self._parse_shared_strings(xml)
+            self._load_from_archive(lazy)
+        else:
+            self._add_sheet(sheet_name)
 
-            from src.cytosheet import Worksheet
-            for sheet_path in sorted(
-                p for p in self._archive.namelist()
-                if p.startswith("xl/worksheets/") and p.endswith(".xml")
-            ):
-                name = sheet_path.rsplit("/", 1)[-1].replace(".xml", "")
-                ws = Worksheet(
-                    self._shared_strings,
-                    name,  # title
-                    self._archive,  # archive
-                    sheet_path,  # sheet_path
-                    not lazy  # preload
-                )
-                self._sheets[name] = ws
-            return
+    cdef void _load_from_archive(self, bint lazy):
+        """Оптимизированная загрузка из архива"""
+        cdef list sheet_paths
+        cdef str sheet_path, name
+        cdef object ws
 
-        self._add_sheet(sheet_name)
+        # Загружаем shared strings если есть
+        if "xl/sharedStrings.xml" in self._archive.namelist():
+            xml = self._archive.read("xl/sharedStrings.xml")
+            self._parse_shared_strings(xml)
 
-    def _add_sheet(self, sheet_name: str | None):
+        # Получаем и сортируем пути к листам
+        sheet_paths = [
+            p for p in self._archive.namelist()
+            if p.startswith("xl/worksheets/") and p.endswith(".xml")
+        ]
+        sheet_paths.sort()
+
+        # Создаем листы
+        for sheet_path in sheet_paths:
+            name = sheet_path.rsplit("/", 1)[-1].replace(".xml", "")
+            ws = Worksheet(
+                self._shared_strings,
+                name,
+                self._archive,
+                sheet_path,
+                not lazy
+            )
+            self._sheets[name] = ws
+
+    cdef void _add_sheet(self, str sheet_name):
+        """Быстрое добавление листа"""
         if sheet_name is None:
-            sheet_name = f"Sheet"
-        new_sheet = Worksheet(shared_strings=self._shared_strings, title=sheet_name)
+            sheet_name = "Sheet"
+        cdef object new_sheet = Worksheet(shared_strings=self._shared_strings, title=sheet_name)
         self._sheets[sheet_name] = new_sheet
 
-    def get_sheet_by_name(self, sheet_name: str):
+    def get_sheet_by_name(self, str sheet_name):
         """
-        Retrieves a worksheet by its name. Supports case-insensitive search.
+        Оптимизированный поиск листа по имени с поддержкой case-insensitive поиска.
         """
+        cdef object sheet
+        cdef dict lower_sheets
+        cdef str sheet_name_lower
+
+        # Сначала прямой поиск
         if sheet_name in self._sheets:
             return self._sheets[sheet_name]
-        lower_sheets = {name.lower(): ws for name, ws in self._sheets.items()}
+
+        # Затем case-insensitive
         sheet_name_lower = sheet_name.lower()
-        if sheet_name_lower in lower_sheets:
-            return lower_sheets[sheet_name_lower]
+        for name, sheet in self._sheets.items():
+            if name.lower() == sheet_name_lower:
+                return sheet
+
         raise KeyError(f"No sheet named '{sheet_name}' exists.")
 
     cpdef void _parse_shared_strings(self, bytes xml_data):
         """
-        Parses shared strings from the sharedStrings.xml file and stores them
-        in the shared strings list.
+        Оптимизированный парсинг shared strings
         """
-        root = etree.fromstring(xml_data)
-        strings = root.xpath('//si')
-        for s in strings:
-            self._shared_strings.append(s.xpath('string(.)')[0])
+        cdef object root = etree.fromstring(xml_data)
+        cdef list strings = root.xpath('//si')
+        cdef object s
+        cdef str text
 
-    def create_sheet(self, title: str = None):
+        # Предварительно выделяем память для списка
+        self._shared_strings = [None] * len(strings)
+
+        for i, s in enumerate(strings):
+            text = s.xpath('string(.)')
+            self._shared_strings[i] = text[0] if text else ""
+
+    def create_sheet(self, str title = None):
         """
         Creates a new worksheet with an optional title.
         """
         if title is None:
             title = f"Sheet{len(self._sheets) + 1}"
-        new_sheet = Worksheet(self._shared_strings, title)
+        cdef object new_sheet = Worksheet(self._shared_strings, title)
         self._sheets[title] = new_sheet
         return new_sheet
 
@@ -114,12 +140,16 @@ cdef class Workbook:
         """
         Returns the active worksheet.
         """
+        cdef list sheet_names
+        cdef str active_name
+
         if 0 <= self._active_sheet_index < len(self._sheets):
-            active_name = list(self._sheets.keys())[self._active_sheet_index]
+            sheet_names = list(self._sheets.keys())
+            active_name = sheet_names[self._active_sheet_index]
             return self._sheets[active_name]
         raise IndexError("No active sheet available")
 
-    def remove_sheet(self, title: str):
+    def remove_sheet(self, str title):
         """
         Removes a worksheet from the workbook by title.
         """
@@ -135,86 +165,110 @@ cdef class Workbook:
         """
         return list(self._sheets.keys())
 
-    def set_active_sheet(self, title: str):
+    def set_active_sheet(self, str title):
         """
         Sets the active worksheet by its title.
         """
+        cdef list sheet_names
         if title in self._sheets:
-            self._active_sheet_index = list(self._sheets.keys()).index(title)
+            sheet_names = list(self._sheets.keys())
+            self._active_sheet_index = sheet_names.index(title)
         else:
             raise KeyError(f"No sheet named '{title}' exists.")
 
-    # XML Generation Methods
     cdef str _generate_sheet_elements(self):
         """
-        Generates XML <sheet> elements for each worksheet.
+        Оптимизированная генерация XML <sheet> элементов
         """
-        return "".join(
-            f'<sheet name="{sheet.title}" sheetId="{i + 1}" r:id="rId{i + 1}"/>'
-            for i, sheet in enumerate(self._sheets.values())
-        )
+        cdef list elements = []
+        cdef int i
+        cdef object sheet
+
+        for i, sheet in enumerate(self._sheets.values()):
+            elements.append(f'<sheet name="{sheet.title}" sheetId="{i + 1}" r:id="rId{i + 1}"/>')
+
+        return "".join(elements)
 
     cdef str _generate_sheet_overrides(self):
         """
-        Generates XML <Override> elements for content types.
+        Оптимизированная генерация XML <Override> элементов
         """
-        return "".join(
-            f'<Override PartName="/xl/worksheets/sheet{i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-            for i in range(len(self._sheets.values()))
-        )
+        cdef list overrides = []
+        cdef int sheet_count = len(self._sheets)
+
+        for i in range(sheet_count):
+            overrides.append(
+                f'<Override PartName="/xl/worksheets/sheet{i + 1}.xml" '
+                f'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            )
+
+        return "".join(overrides)
 
     cdef str _generate_relationships(self):
         """
-        Generates XML <Relationship> elements for each worksheet.
+        Оптимизированная генерация XML <Relationship> элементов
         """
-        return "".join(
-            f'<Relationship Id="rId{i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
-            f'Target="worksheets/{sheet.title}.xml"/>' for i, sheet in enumerate(self._sheets.values())
-        )
+        cdef list relationships = []
+        cdef int i
+        cdef object sheet
 
-    # Updated _get_workbook_xml to use _generate_sheet_elements
+        for i, sheet in enumerate(self._sheets.values()):
+            relationships.append(
+                f'<Relationship Id="rId{i + 1}" '
+                f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+                f'Target="worksheets/{sheet.title}.xml"/>'
+            )
+
+        return "".join(relationships)
+
     cdef bytes _get_workbook_xml(self):
         """
-        Generates the XML content for [Content_Types].xml.
+        Генерация XML содержимого для workbook.xml
         """
         return WORKBOOK_XML_TEMPLATE.format(sheets=self._generate_sheet_elements()).encode('utf-8')
 
     cdef bytes _get_content_types_xml(self):
         """
-        Generates the XML content for [Content_Types].xml.
+        Генерация XML содержимого для [Content_Types].xml
         """
         return CONTENT_TYPES_XML_TEMPLATE.format(sheet_overrides=self._generate_sheet_overrides()).encode('utf-8')
 
     def save_virtual_workbook(self) -> bytes:
         """
-        Creates an in-memory ZIP file containing the workbook data for virtual saving.
+        Оптимизированное создание ZIP файла в памяти
         """
-        buffer = BytesIO()
+        cdef object buffer = BytesIO()
+        cdef object sheet
+
         with ZipFile(buffer, 'w') as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
-            # Для каждого листа вызываем get_xml_data()
+
             for sheet in self._sheets.values():
                 zip_file.writestr(f"xl/worksheets/{sheet.title}.xml", sheet.get_xml_data())
+
         buffer.seek(0)
         return buffer.getvalue()
 
-    def save(self, file_path: str):
+    def save(self, str file_path):
         """
-        Saves the workbook to a physical file in the specified file path.
+        Оптимизированное сохранение в файл
         """
         if not file_path:
             raise ValueError("File path cannot be empty")
 
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        cdef str dir_path = os.path.dirname(file_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
 
+        cdef object sheet
         with ZipFile(file_path, 'w') as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
             zip_file.writestr("xl/_rels/workbook.xml.rels",
                               RELATIONSHIPS_XML_TEMPLATE.format(relationships=self._generate_relationships()))
             zip_file.writestr("_rels/.rels", MAIN_RELATIONSHIPS_XML_TEMPLATE)
-            # Здесь тоже нужно итерировать по всем листам
+
             for sheet in self._sheets.values():
                 zip_file.writestr(f"xl/worksheets/{sheet.title}.xml", sheet.get_xml_data())
 
@@ -225,3 +279,4 @@ cdef class Workbook:
     def close(self):
         if self._archive is not None:
             self._archive.close()
+            self._archive = None
