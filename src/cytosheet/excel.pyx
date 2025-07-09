@@ -1,5 +1,5 @@
 from zipfile import ZipFile
-from src.cytosheet import Workbook
+from .workbook import Workbook
 
 def load_workbook(str filename, bint lazy = False):
     """

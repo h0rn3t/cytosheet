@@ -9,6 +9,7 @@ cdef class Worksheet:
     cdef public str _sheet_path
     cdef public bint _preloaded
     cdef public bint _is_small_file
+    cdef public list _merged_cells  # List of merged cell ranges
 
     def __init__(
             self,
@@ -25,6 +26,7 @@ cdef class Worksheet:
         self._sheet_path = _sheet_path
         self._preloaded = False
         self._is_small_file = False
+        self._merged_cells = []
 
         if archive is not None and _preload and _sheet_path is not None:
             xml = archive.read(_sheet_path)
@@ -409,6 +411,143 @@ cdef class Worksheet:
         # Если не число - возвращаем строку
         return raw_value
 
+    cdef int _col_to_num(self, str col):
+        """Преобразует буквенную координату столбца в числовую"""
+        cdef int num = 0
+        cdef int c_val
+        for c in col:
+            c_val = ord(c)
+            # Convert lowercase to uppercase if needed
+            if 97 <= c_val <= 122:  # a-z
+                c_val -= 32  # Convert to A-Z
+            num = num * 26 + (c_val - ord('A') + 1)
+        return num
+
+    cdef str _num_to_col(self, int num):
+        """Преобразует числовую координату столбца в буквенную"""
+        cdef str col = ""
+        cdef int remainder
+        while num > 0:
+            num, remainder = divmod(num - 1, 26)
+            col = chr(ord('A') + remainder) + col
+        return col
+
+    cdef tuple _parse_range(self, str range_string):
+        """
+        Разбирает строку диапазона на координаты начальной и конечной ячеек.
+
+        Returns:
+            tuple: (start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num)
+        """
+        # Разбираем диапазон
+        cdef str start_ref, end_ref, start_col, end_col
+        cdef int start_row, end_row, start_col_num, end_col_num, i
+
+        start_ref, end_ref = range_string.split(':')
+
+        # Получаем координаты начальной ячейки
+        i = 0
+        while i < len(start_ref) and start_ref[i].isalpha():
+            i += 1
+        start_col = start_ref[:i]
+        start_row = int(start_ref[i:])
+
+        # Получаем координаты конечной ячейки
+        i = 0
+        while i < len(end_ref) and end_ref[i].isalpha():
+            i += 1
+        end_col = end_ref[:i]
+        end_row = int(end_ref[i:])
+
+        # Преобразуем буквенные координаты в числовые
+        start_col_num = self._col_to_num(start_col)
+        end_col_num = self._col_to_num(end_col)
+
+        return (start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num)
+
+    cpdef object merge_cells(self, str range_string):
+        """
+        Объединяет ячейки в указанном диапазоне.
+
+        Args:
+            range_string: Строка диапазона в формате 'A1:B2'
+
+        Returns:
+            Cell: Первая ячейка объединенного диапазона
+        """
+        from .cell import Cell
+
+        cdef str start_ref, end_ref, start_col, end_col, col, cell_ref
+        cdef int start_row, end_row, start_col_num, end_col_num, row, col_num
+        cdef object cell
+
+        # Проверяем формат диапазона
+        if ':' not in range_string:
+            raise ValueError(f"Неверный формат диапазона: {range_string}. Ожидается формат 'A1:B2'")
+
+        # Добавляем диапазон в список объединенных ячеек
+        if range_string not in self._merged_cells:
+            self._merged_cells.append(range_string)
+
+        # Разбираем диапазон
+        start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num = self._parse_range(range_string)
+
+        # Создаем или обновляем ячейки в диапазоне
+        for row in range(start_row, end_row + 1):
+            for col_num in range(start_col_num, end_col_num + 1):
+                col = self._num_to_col(col_num)
+                cell_ref = f"{col}{row}"
+
+                # Если ячейка не существует, создаем ее
+                if cell_ref not in self._cells:
+                    cell = Cell(position=cell_ref, parent=self)
+                    self._cells[cell_ref] = cell
+                else:
+                    cell = self._cells[cell_ref]
+
+                # Помечаем ячейку как объединенную
+                cell.is_merged_cell = True
+                cell.merged_range = range_string
+
+                # Только первая ячейка содержит значение, остальные - пустые
+                if row != start_row or col_num != start_col_num:
+                    cell.value = None
+
+        return self._cells[start_ref]
+
+    cpdef void unmerge_cells(self, str range_string):
+        """
+        Разъединяет ячейки в указанном диапазоне.
+
+        Args:
+            range_string: Строка диапазона в формате 'A1:B2'
+        """
+        cdef str start_ref, end_ref, start_col, end_col, col, cell_ref
+        cdef int start_row, end_row, start_col_num, end_col_num, row, col_num
+        cdef object cell
+
+        # Проверяем, есть ли диапазон в списке объединенных ячеек
+        if range_string not in self._merged_cells:
+            return
+
+        # Удаляем диапазон из списка объединенных ячеек
+        self._merged_cells.remove(range_string)
+
+        # Разбираем диапазон
+        start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num = self._parse_range(range_string)
+
+        # Обновляем ячейки в диапазоне
+        for row in range(start_row, end_row + 1):
+            for col_num in range(start_col_num, end_col_num + 1):
+                col = self._num_to_col(col_num)
+                cell_ref = f"{col}{row}"
+
+                # Если ячейка существует, обновляем ее
+                if cell_ref in self._cells:
+                    cell = self._cells[cell_ref]
+                    cell.is_merged_cell = False
+                    cell.merged_range = None
+
     cpdef bytes get_xml_data(self):
         """
         Оптимизированная генерация XML данных для листа.
@@ -418,11 +557,11 @@ cdef class Worksheet:
         cdef int row, i
         cdef object cell_value
         cdef object cell
-        cdef list cells_in_row, rows_xml
+        cdef list cells_in_row, rows_xml, merged_cells_xml
 
         # Группируем ячейки по строкам
         for cell_position, cell in self._cells.items():
-            if cell.value is not None:
+            if cell.value is not None or cell.is_merged_cell:
                 # Более эффективное разделение позиции
                 i = 0
                 while i < len(cell_position) and cell_position[i].isalpha():
@@ -433,14 +572,30 @@ cdef class Worksheet:
                 if row not in rows_data:
                     rows_data[row] = []
 
+                # Пропускаем объединенные ячейки, кроме первой
+                if cell.is_merged_cell and cell_position != cell.merged_range.split(':')[0]:
+                    continue
+
                 cell_value = cell.value
+
+                # Подготовка атрибутов стиля
+                style_attrs = ""
+                if hasattr(cell, 'style') and cell.style is not None:
+                    # Здесь можно добавить атрибуты стиля в XML
+                    # Например, s="1" для ссылки на стиль в таблице стилей
+                    # В полной реализации нужно генерировать таблицу стилей и ссылаться на нее
+                    pass
+
                 # Быстрое определение типа данных
                 if isinstance(cell_value, (int, float)):
-                    tag = f'<c r="{cell_position}" t="n"><v>{cell_value}</v></c>'
-                else:
+                    tag = f'<c r="{cell_position}" t="n"{style_attrs}><v>{cell_value}</v></c>'
+                elif cell_value is not None:
                     # Экранируем XML символы для строк
                     escaped_value = str(cell_value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    tag = f'<c r="{cell_position}" t="str"><v>{escaped_value}</v></c>'
+                    tag = f'<c r="{cell_position}" t="str"{style_attrs}><v>{escaped_value}</v></c>'
+                else:
+                    # Пустая ячейка
+                    tag = f'<c r="{cell_position}"{style_attrs}></c>'
 
                 rows_data[row].append(tag)
 
@@ -450,11 +605,24 @@ cdef class Worksheet:
             cells_in_row = rows_data[row]
             rows_xml.append(f'<row r="{row}">{"".join(cells_in_row)}</row>')
 
+        # Генерируем XML для объединенных ячеек
+        merged_cells_xml = []
+        for merged_range in self._merged_cells:
+            merged_cells_xml.append(f'<mergeCell ref="{merged_range}"/>')
+
+        # Добавляем секцию mergeCells, если есть объединенные ячейки
+        merged_cells_section = ""
+        if merged_cells_xml:
+            merged_cells_section = f"""
+    <mergeCells count="{len(self._merged_cells)}">
+        {"".join(merged_cells_xml)}
+    </mergeCells>"""
+
         cdef str xml_content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
     <sheetData>
         {"".join(rows_xml)}
-    </sheetData>
+    </sheetData>{merged_cells_section}
 </worksheet>"""
 
         return xml_content.encode('utf-8')

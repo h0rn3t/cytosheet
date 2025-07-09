@@ -8,6 +8,7 @@ import random
 import gc
 import sys
 import traceback
+import pytest
 from typing import List, Dict, Any, Tuple
 
 
@@ -15,7 +16,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 try:
     from openpyxl import load_workbook as openpyxl_load_workbook, Workbook as OpenpyxlWorkbook
-    from src.cytosheet import Workbook, load_workbook
+    from cytosheet import (
+        Workbook, load_workbook, 
+        Color, Side, Border, Font, PatternFill, 
+        Alignment, Protection, Style
+    )
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
     print("Убедитесь, что все зависимости установлены и cytosheet скомпилирован")
@@ -394,5 +399,116 @@ def main():
                         print(f"  {test_name}: Cytosheet {status} в {abs(speedup):.2f}x")
 
 
+# Performance tests from test_performance.py
+
+def test_merge_cells_performance():
+    """Test the performance of merge_cells method."""
+    # Create a new workbook
+    wb = Workbook()
+    ws = wb.active
+
+    # Set values in cells
+    ws['A1'] = 'Merged Cell'
+
+    # Measure the time to merge cells
+    start_time = time.time()
+    for i in range(1, 101):
+        range_string = f'A{i}:C{i+2}'
+        merged_cell = ws.merge_cells(range_string)
+    end_time = time.time()
+
+    merge_time = end_time - start_time
+    print(f"Time to merge 100 cell ranges: {merge_time:.4f} seconds")
+
+    # Measure the time to unmerge cells
+    start_time = time.time()
+    for i in range(1, 101):
+        range_string = f'A{i}:C{i+2}'
+        ws.unmerge_cells(range_string)
+    end_time = time.time()
+
+    unmerge_time = end_time - start_time
+    print(f"Time to unmerge 100 cell ranges: {unmerge_time:.4f} seconds")
+
+    # Assert that the operations completed in a reasonable time
+    assert merge_time < 1.0, f"Merge operation took too long: {merge_time:.4f} seconds"
+    assert unmerge_time < 1.0, f"Unmerge operation took too long: {unmerge_time:.4f} seconds"
+
+def test_style_performance():
+    """Test the performance of style-related methods."""
+    # Create a new workbook
+    wb = Workbook()
+    ws = wb.active
+
+    # Create a style
+    font = Font(name='Arial', size=12, bold=True, italic=True)
+    border = Border(
+        left=Side(style='thin', color=Color(rgb='FF0000')),
+        right=Side(style='thin', color=Color(rgb='FF0000')),
+        top=Side(style='thin', color=Color(rgb='FF0000')),
+        bottom=Side(style='thin', color=Color(rgb='FF0000'))
+    )
+    fill = PatternFill(patternType='solid', fgColor=Color(rgb='FFFF00'))
+    alignment = Alignment(horizontal='center', vertical='center')
+    protection = Protection(locked=True, hidden=False)
+    style = Style(font=font, border=border, fill=fill, alignment=alignment, protection=protection)
+
+    # Measure the time to apply styles to cells
+    start_time = time.time()
+    for i in range(1, 1001):
+        cell_ref = f'A{i}'
+        ws[cell_ref] = f'Cell {i}'
+        ws[cell_ref].style = style
+    end_time = time.time()
+
+    style_time = end_time - start_time
+    print(f"Time to apply styles to 1000 cells: {style_time:.4f} seconds")
+
+    # Measure the time to access style properties
+    start_time = time.time()
+    for i in range(1, 1001):
+        cell_ref = f'A{i}'
+        font = ws[cell_ref].style.font
+        border = ws[cell_ref].style.border
+        fill = ws[cell_ref].style.fill
+        alignment = ws[cell_ref].style.alignment
+        protection = ws[cell_ref].style.protection
+    end_time = time.time()
+
+    access_time = end_time - start_time
+    print(f"Time to access style properties of 1000 cells: {access_time:.4f} seconds")
+
+    # Assert that the operations completed in a reasonable time
+    assert style_time < 2.0, f"Style application took too long: {style_time:.4f} seconds"
+    assert access_time < 2.0, f"Style access took too long: {access_time:.4f} seconds"
+
+def test_border_add_performance():
+    """Test the performance of the Border.__add__ method."""
+    # Create borders
+    border1 = Border(
+        left=Side(style='thin', color=Color(rgb='FF0000')),
+        right=Side(style='thin', color=Color(rgb='FF0000'))
+    )
+    border2 = Border(
+        top=Side(style='thin', color=Color(rgb='0000FF')),
+        bottom=Side(style='thin', color=Color(rgb='0000FF'))
+    )
+
+    # Measure the time to add borders
+    start_time = time.time()
+    for _ in range(10000):
+        result = border1 + border2
+    end_time = time.time()
+
+    add_time = end_time - start_time
+    print(f"Time to add borders 10000 times: {add_time:.4f} seconds")
+
+    # Assert that the operation completed in a reasonable time
+    assert add_time < 1.0, f"Border addition took too long: {add_time:.4f} seconds"
+
 if __name__ == "__main__":
     main()
+    # Uncomment to run performance tests
+    # test_merge_cells_performance()
+    # test_style_performance()
+    # test_border_add_performance()
