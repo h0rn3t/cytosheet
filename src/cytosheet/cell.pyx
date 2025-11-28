@@ -5,6 +5,7 @@ cdef class Cell:
     cdef public object parent
     cdef public bint is_merged_cell
     cdef public str merged_range
+    cdef public str data_type  # 'n', 's', 'b', 'f', 'd', 'e'
 
     def __init__(self, str position=None, object value=None, object style=None, object parent=None):
         self.position = position if position is not None else ""
@@ -13,10 +14,14 @@ cdef class Cell:
         self.parent = parent
         self.is_merged_cell = False
         self.merged_range = None
+        self.data_type = None
 
     def __repr__(self):
         if self.is_merged_cell:
             return f"<MergedCell position={self.position}, merged_range={self.merged_range}>"
+        # Показываем data_type для отладки, если он задан
+        if self.data_type is not None:
+            return f"<Cell position={self.position}, value={self.value}, data_type={self.data_type}>"
         return f"<Cell position={self.position}, value={self.value}>"
 
     cpdef str get_position(self):
@@ -24,7 +29,7 @@ cdef class Cell:
         return self.position
 
     cpdef void set_value(self, object value):
-        """Быстрая установка значения"""
+        """Быстрая установка значения без изменения типа данных"""
         self.value = value
 
     cpdef object get_value(self):

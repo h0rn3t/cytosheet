@@ -21,4 +21,3 @@ Cytosheet is a PoC library for working with XLSX files, written in Cython.
    pip install .
    python -m build
    python setup.py build_ext --inplace
-

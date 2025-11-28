@@ -1,15 +1,20 @@
 from lxml import etree
 import io
 
+from .cell import Cell
+
+
 cdef class Worksheet:
     cdef public dict _cells
+    cdef public int _max_row
+    cdef public int _max_column
     cdef public str title
     cdef public list _shared_strings
     cdef public object _archive  # ZipFile | None
     cdef public str _sheet_path
     cdef public bint _preloaded
     cdef public bint _is_small_file
-    cdef public list _merged_cells  # List of merged cell ranges
+    cdef public list _merged_cells  # List[str]
 
     def __init__(
             self,
@@ -27,88 +32,134 @@ cdef class Worksheet:
         self._preloaded = False
         self._is_small_file = False
         self._merged_cells = []
+        self._max_row = 0
+        self._max_column = 0
 
         if archive is not None and _preload and _sheet_path is not None:
             xml = archive.read(_sheet_path)
-
-            # Быстрая оценка размера файла по размеру XML
             xml_size = len(xml)
             self._is_small_file = xml_size < 50000  # ~500 строк
-
-            # Выбираем оптимальный метод парсинга
             if self._is_small_file:
                 self._parse_sheet_simple(xml)
             else:
                 self._parse_sheet(xml)
 
+            # Після повного парсингу один раз обчислюємо max_row/max_column
+            self._recalculate_bounds()
             self._preloaded = True
 
+    cdef void _update_bounds_for_cell(self, str coord):
+        """Оновити _max_row/_max_column для однієї координати типу 'A1'."""
+        cdef int i = 0
+        cdef int row, col_num
+        while i < len(coord) and coord[i].isalpha():
+            i += 1
+        if i == 0 or i == len(coord):
+            return
+        row = int(coord[i:])
+        if row > self._max_row:
+            self._max_row = row
+        col_num = self._col_to_num(coord[:i])
+        if col_num > self._max_column:
+            self._max_column = col_num
+
+    cdef void _recalculate_bounds(self):
+        """Повне переобчислення max_row/max_column з _cells."""
+        cdef str coord
+        cdef int i, row, col_num
+        self._max_row = 0
+        self._max_column = 0
+        for coord in self._cells.keys():
+            i = 0
+            while i < len(coord) and coord[i].isalpha():
+                i += 1
+            if i == 0 or i == len(coord):
+                continue
+            row = int(coord[i:])
+            if row > self._max_row:
+                self._max_row = row
+            col_num = self._col_to_num(coord[:i])
+            if col_num > self._max_column:
+                self._max_column = col_num
+
+    # ------------------------------------------------------------------
+    # Парсинг листа з XML
+    # ------------------------------------------------------------------
+
+    cdef void _parse_sheet(self, bytes xml_data):
+        """Выбор между стандартным и чанковым парсером для средних/больших файлов."""
+        cdef int xml_size = len(xml_data)
+        cdef bint use_chunked_parsing = xml_size > 100000
+        if use_chunked_parsing:
+            self._parse_sheet_chunked(xml_data)
+        else:
+            self._parse_sheet_standard(xml_data)
+
     cdef void _parse_sheet_simple(self, bytes xml_data):
-        """Упрощенный парсинг для малых файлов"""
-        from .cell import Cell
-
-        # Для малых файлов используем более простой и быстрый подход
+        """Упрощённый string-based парсер для малых файлов с поддержкой формул.<f>."""
         cdef str xml_str = xml_data.decode('utf-8')
-
-        # Используем простой string parsing вместо полноценного XML
         cdef int start_pos = 0
-        cdef int cell_start, cell_end, r_start, r_end, v_start, v_end, t_start, t_end
-        cdef str cell_ref, cell_type, raw_value
+        cdef int cell_start, cell_end
+        cdef int r_start, r_end, t_start, t_end, v_start, v_end, f_start, f_end
+        cdef str cell_ref, cell_type, raw_value, formula_text
         cdef object value
         cdef int shared_index
 
-        # Ищем все ячейки простым поиском строк
         while True:
             cell_start = xml_str.find('<c ', start_pos)
             if cell_start == -1:
                 break
-
             cell_end = xml_str.find('</c>', cell_start)
             if cell_end == -1:
                 break
 
-            # Извлекаем атрибут r (адрес ячейки)
-            r_start = xml_str.find('r="', cell_start)
-            if r_start == -1 or r_start > cell_end:
+            # r="A1"
+            r_start = xml_str.find('r="', cell_start, cell_end)
+            if r_start == -1:
                 start_pos = cell_end + 4
                 continue
-
             r_start += 3
-            r_end = xml_str.find('"', r_start)
-            if r_end == -1 or r_end > cell_end:
+            r_end = xml_str.find('"', r_start, cell_end)
+            if r_end == -1:
                 start_pos = cell_end + 4
                 continue
-
             cell_ref = xml_str[r_start:r_end]
 
-            # Извлекаем атрибут t (тип ячейки)
-            t_start = xml_str.find('t="', cell_start)
-            if t_start != -1 and t_start < cell_end:
+            # t="s" / t="str" / t="n" / ...
+            cell_type = None
+            t_start = xml_str.find('t="', cell_start, cell_end)
+            if t_start != -1:
                 t_start += 3
-                t_end = xml_str.find('"', t_start)
-                if t_end != -1 and t_end < cell_end:
+                t_end = xml_str.find('"', t_start, cell_end)
+                if t_end != -1:
                     cell_type = xml_str[t_start:t_end]
-                else:
-                    cell_type = None
-            else:
-                cell_type = None
 
-            # Извлекаем значение ячейки
-            v_start = xml_str.find('<v>', cell_start)
-            if v_start == -1 or v_start > cell_end:
+            # Формула имеет приоритет над <v>
+            f_start = xml_str.find('<f>', cell_start, cell_end)
+            if f_start != -1:
+                f_start += 3
+                f_end = xml_str.find('</f>', f_start, cell_end)
+                if f_end != -1:
+                    formula_text = xml_str[f_start:f_end]
+                    value = '=' + formula_text
+                    cell = Cell(position=cell_ref, value=value)
+                    cell.data_type = 'f'
+                    self._cells[cell_ref] = cell
+                    start_pos = cell_end + 4
+                    continue
+
+            v_start = xml_str.find('<v>', cell_start, cell_end)
+            if v_start == -1:
                 start_pos = cell_end + 4
                 continue
-
             v_start += 3
-            v_end = xml_str.find('</v>', v_start)
-            if v_end == -1 or v_end > cell_end:
+            v_end = xml_str.find('</v>', v_start, cell_end)
+            if v_end == -1:
                 start_pos = cell_end + 4
                 continue
-
             raw_value = xml_str[v_start:v_end]
 
-            # Быстрая обработка значения
-            if cell_type == 's':  # shared string
+            if cell_type == 's':
                 try:
                     shared_index = int(raw_value)
                     if 0 <= shared_index < len(self._shared_strings):
@@ -125,197 +176,8 @@ cdef class Worksheet:
 
             start_pos = cell_end + 4
 
-    def __getitem__(self, str key):
-        from .cell import Cell
-        cdef object cell
-        if key in self._cells:
-            return self._cells[key]
-        else:
-            cell = Cell(position=key)
-            self._cells[key] = cell
-            return cell
-
-    def __setitem__(self, str key, object value):
-        from .cell import Cell
-        cdef object cell
-        if key not in self._cells:
-            cell = Cell(position=key, value=value)
-            self._cells[key] = cell
-        else:
-            self._cells[key].value = value
-
-    def iter_rows(self, bint values_only = True):
-        """
-        Потоковое чтение строк. Работает только для листов,
-        открытых из файла (self._archive != None).
-        """
-        if self._archive is None:
-            raise RuntimeError("iter_rows доступен только в режиме lazy")
-
-        cdef str ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-        cdef str row_tag = f"{ns}row"
-        cdef str c_tag = f"{ns}c"
-        cdef str v_tag = f"{ns}v"
-        cdef list out
-        cdef str t, raw
-        cdef object value, v
-        cdef int idx
-
-        with self._archive.open(self._sheet_path) as fh:
-            for _event, row in etree.iterparse(fh, tag=row_tag, events=("end",)):
-                out = []
-                for c in row.iter(c_tag):
-                    t = c.get("t")
-                    v = c.find(v_tag)
-                    if v is None:
-                        continue
-                    raw = v.text
-                    if raw is None:
-                        continue
-
-                    if t == "s":  # shared-string
-                        try:
-                            idx = int(raw)
-                            if 0 <= idx < len(self._shared_strings):
-                                value = self._shared_strings[idx]
-                            else:
-                                value = raw
-                        except (ValueError, TypeError):
-                            value = raw
-                    else:  # число / строка
-                        value = self._convert_cell_value(raw)
-
-                    out.append(value if values_only else raw)
-                yield out
-                row.clear()
-
-    cdef object _convert_cell_value(self, str raw_value):
-        """Быстрое преобразование значения ячейки"""
-        cdef long long_val
-        cdef double float_val
-
-        if not raw_value:
-            return raw_value
-
-        try:
-            # Сначала пробуем int, но с проверкой размера
-            if '.' not in raw_value and 'e' not in raw_value.lower() and 'E' not in raw_value:
-                # Проверяем, что число не слишком большое для int
-                if len(raw_value) <= 10:  # Примерно 2^31 = 2,147,483,647
-                    long_val = int(raw_value)
-                    # Проверяем диапазон для безопасности
-                    if -2147483648 <= long_val <= 2147483647:
-                        return int(long_val)
-                    else:
-                        return long_val  # Возвращаем как long
-                else:
-                    # Для очень больших чисел пробуем float
-                    float_val = float(raw_value)
-                    return float_val
-            else:
-                # Затем float
-                float_val = float(raw_value)
-                return float_val
-        except (ValueError, TypeError, OverflowError):
-            return raw_value
-
-    cdef void _parse_sheet(self, bytes xml_data):
-        """Максимально оптимизированный парсинг листа для больших файлов"""
-        from .cell import Cell
-
-        cdef dict ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        cdef object xml_stream = io.BytesIO(xml_data)
-
-        # Для больших файлов используем более эффективную стратегию
-        cdef int xml_size = len(xml_data)
-        cdef bint use_chunked_parsing = xml_size > 100000  # >~1000 строк
-
-        if use_chunked_parsing:
-            self._parse_sheet_chunked(xml_data)
-        else:
-            self._parse_sheet_standard(xml_data)
-
-    cdef void _parse_sheet_chunked(self, bytes xml_data):
-        """Чанковый парсинг для больших файлов"""
-        from .cell import Cell
-
-        cdef dict ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        cdef object xml_stream = io.BytesIO(xml_data)
-
-        # Используем более эффективный iterparse с очисткой памяти
-        cdef object context = etree.iterparse(
-            xml_stream,
-            events=('end',),
-            tag='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c',
-            recover=True  # Более быстрый парсинг
-        )
-
-        cdef str col_ref, cell_type, raw
-        cdef int shared_string_index, batch_size, processed_count
-        cdef object value, v_elem, cell
-
-        # Батчевая обработка для больших файлов
-        cdef dict temp_batch = {}
-        batch_size = 1000  # Обрабатываем по 1000 ячеек за раз
-        processed_count = 0
-
-        try:
-            for event, cell_elem in context:
-                # Быстрая проверка атрибутов
-                col_ref = cell_elem.get('r')
-                if col_ref is None:
-                    cell_elem.clear()
-                    continue
-
-                cell_type = cell_elem.get('t')
-                v_elem = cell_elem.find('main:v', namespaces=ns)
-
-                if v_elem is None:
-                    cell_elem.clear()
-                    continue
-
-                raw = v_elem.text
-                if raw is None:
-                    cell_elem.clear()
-                    continue
-
-                # Быстрое преобразование значения
-                if cell_type == 's':
-                    try:
-                        shared_string_index = int(raw)
-                        if 0 <= shared_string_index < len(self._shared_strings):
-                            value = self._shared_strings[shared_string_index]
-                        else:
-                            value = raw
-                    except (ValueError, TypeError):
-                        value = raw
-                else:
-                    value = self._convert_cell_value_fast(raw)
-
-                if value is not None:
-                    temp_batch[col_ref] = Cell(position=col_ref, value=value)
-                    processed_count += 1
-
-                # Периодически сбрасываем батч в основной словарь
-                if processed_count >= batch_size:
-                    self._cells.update(temp_batch)
-                    temp_batch.clear()
-                    processed_count = 0
-
-                # Важно: немедленно очищаем элемент
-                cell_elem.clear()
-
-        except Exception as e:
-            print(f"Ошибка чанкового парсинга: {e}")
-        finally:
-            # Обрабатываем оставшиеся элементы
-            if temp_batch:
-                self._cells.update(temp_batch)
-
     cdef void _parse_sheet_standard(self, bytes xml_data):
-        """Стандартный парсинг для средних файлов"""
-        from .cell import Cell
-
+        """Стандартный iterparse-парсер для средних файлов с поддержкой <f>."""
         cdef dict ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
         cdef object xml_stream = io.BytesIO(xml_data)
         cdef object context = etree.iterparse(
@@ -326,7 +188,7 @@ cdef class Worksheet:
 
         cdef str col_ref, cell_type, raw
         cdef int shared_string_index
-        cdef object value, v_elem, cell
+        cdef object value, v_elem, f_elem, cell
         cdef dict temp_cells = {}
 
         try:
@@ -336,9 +198,18 @@ cdef class Worksheet:
                     cell_elem.clear()
                     continue
 
+                # Формула
+                f_elem = cell_elem.find('main:f', namespaces=ns)
+                if f_elem is not None and f_elem.text is not None:
+                    value = '=' + f_elem.text
+                    cell = Cell(position=col_ref, value=value)
+                    cell.data_type = 'f'
+                    temp_cells[col_ref] = cell
+                    cell_elem.clear()
+                    continue
+
                 cell_type = cell_elem.get('t')
                 v_elem = cell_elem.find('main:v', namespaces=ns)
-
                 if v_elem is None:
                     cell_elem.clear()
                     continue
@@ -364,67 +235,284 @@ cdef class Worksheet:
                     temp_cells[col_ref] = Cell(position=col_ref, value=value)
 
                 cell_elem.clear()
-
         except Exception as e:
             print(f"Ошибка стандартного парсинга: {e}")
         finally:
             self._cells.update(temp_cells)
 
-    cdef object _convert_cell_value_fast(self, str raw_value):
-        """Максимально быстрое преобразование значения ячейки"""
+    cdef void _parse_sheet_chunked(self, bytes xml_data):
+        """Чанковый парсер для больших файлов с поддержкой <f>."""
+        cdef dict ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+        cdef object xml_stream = io.BytesIO(xml_data)
+        cdef object context = etree.iterparse(
+            xml_stream,
+            events=('end',),
+            tag='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c',
+            recover=True
+        )
+
+        cdef str col_ref, cell_type, raw
+        cdef int shared_string_index, batch_size, processed_count
+        cdef object value, v_elem, f_elem, cell
+        cdef dict temp_batch = {}
+        batch_size = 1000
+        processed_count = 0
+
+        try:
+            for event, cell_elem in context:
+                col_ref = cell_elem.get('r')
+                if col_ref is None:
+                    cell_elem.clear()
+                    continue
+
+                # Формула
+                f_elem = cell_elem.find('main:f', namespaces=ns)
+                if f_elem is not None and f_elem.text is not None:
+                    value = '=' + f_elem.text
+                    cell = Cell(position=col_ref, value=value)
+                    cell.data_type = 'f'
+                    temp_batch[col_ref] = cell
+                    processed_count += 1
+                else:
+                    cell_type = cell_elem.get('t')
+                    v_elem = cell_elem.find('main:v', namespaces=ns)
+                    if v_elem is None:
+                        cell_elem.clear()
+                        continue
+
+                    raw = v_elem.text
+                    if raw is None:
+                        cell_elem.clear()
+                        continue
+
+                    if cell_type == 's':
+                        try:
+                            shared_string_index = int(raw)
+                            if 0 <= shared_string_index < len(self._shared_strings):
+                                value = self._shared_strings[shared_string_index]
+                            else:
+                                value = raw
+                        except (ValueError, TypeError):
+                            value = raw
+                    else:
+                        value = self._convert_cell_value_fast(raw)
+
+                    if value is not None:
+                        temp_batch[col_ref] = Cell(position=col_ref, value=value)
+                        processed_count += 1
+
+                if processed_count >= batch_size:
+                    self._cells.update(temp_batch)
+                    temp_batch.clear()
+                    processed_count = 0
+
+                cell_elem.clear()
+        except Exception as e:
+            print(f"Ошибка чанкового парсинга: {e}")
+        finally:
+            if temp_batch:
+                self._cells.update(temp_batch)
+
+    # ------------------------------------------------------------------
+    # Доступ і запис ячеек
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, str key):
+        cdef object cell
+        if key in self._cells:
+            return self._cells[key]
+        cell = Cell(position=key, parent=self)
+        self._cells[key] = cell
+        self._update_bounds_for_cell(key)
+        return cell
+
+    def __setitem__(self, str key, object value):
+        cdef object cell
+        if key not in self._cells:
+            cell = Cell(position=key, value=value, parent=self)
+            # простая эвристика для формул
+            if isinstance(value, str) and value.startswith('='):
+                cell.data_type = 'f'
+            self._cells[key] = cell
+        else:
+            cell = self._cells[key]
+            cell.value = value
+            if isinstance(value, str) and value.startswith('='):
+                cell.data_type = 'f'
+
+        self._update_bounds_for_cell(key)
+
+    # ------------------------------------------------------------------
+    # openpyxl-совместный доступ к ячейкам по row/column + append/max_*.
+    # ------------------------------------------------------------------
+
+    def cell(self, int row, int column, object value=None):
+        """Доступ до ячейки по координатах (1-based), як в openpyxl.
+
+        Якщо value не None – одразу встановлюємо його.
+        """
+        if row < 1 or column < 1:
+            raise ValueError("row and column must be >= 1")
+
+        cdef str col_letters = self._num_to_col(column)
+        cdef str coord = f"{col_letters}{row}"
+        cdef object cell = self._cells.get(coord)
+
+        if cell is None:
+            cell = Cell(position=coord, parent=self)
+            self._cells[coord] = cell
+
+        if value is not None:
+            cell.value = value
+            if isinstance(value, str) and value.startswith('='):
+                cell.data_type = 'f'
+
+        # Оновлюємо границі
+        if row > self._max_row:
+            self._max_row = row
+        if column > self._max_column:
+            self._max_column = column
+
+        return cell
+
+    @property
+    def max_row(self):
+        """Номер останнього рядка з даними (як у openpyxl)."""
+        if self._max_row == 0 and self._cells:
+            self._recalculate_bounds()
+        return self._max_row
+
+    @property
+    def max_column(self):
+        """Номер останньої колонки з даними (як у openpyxl)."""
+        if self._max_column == 0 and self._cells:
+            self._recalculate_bounds()
+        return self._max_column
+
+    def append(self, object iterable):
+        """Додати рядок значень в кінець аркуша (openpyxl-сумісний append)."""
+        if iterable is None:
+            return
+
+        cdef int row = self.max_row + 1
+        cdef int col
+
+        # Строки и bytes считаем скалярами, як в openpyxl: кладём целиком в первый столбец.
+        if isinstance(iterable, (str, bytes)):
+            self.cell(row=row, column=1, value=iterable)
+            return
+
+        # Підтримка словників поки не потрібна для наших сценаріїв,
+        # тому працюємо з послідовностями.
+        try:
+            for col, value in enumerate(iterable, 1):
+                self.cell(row=row, column=col, value=value)
+        except TypeError:
+            # Неітерований об'єкт – просто кладемо його в першу колонку
+            self.cell(row=row, column=1, value=iterable)
+
+    # ------------------------------------------------------------------
+    # Lazy iter_rows (используется в бенчмарках и тестах)
+    # ------------------------------------------------------------------
+
+    def iter_rows(self, bint values_only = True):
+        """Потоковое чтение строк (lazy режим)."""
+        if self._archive is None:
+            raise RuntimeError("iter_rows доступен только в режиме lazy")
+
+        cdef str ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        cdef str row_tag = f"{ns}row"
+        cdef str c_tag = f"{ns}c"
+        cdef str v_tag = f"{ns}v"
+        cdef str f_tag = f"{ns}f"
+        cdef list out
+        cdef str t, raw, ftext
+        cdef object value, v, f
+        cdef int idx
+
+        with self._archive.open(self._sheet_path) as fh:
+            for _event, row in etree.iterparse(fh, tag=row_tag, events=("end",)):
+                out = []
+                for c in row.iter(c_tag):
+                    # Формула має приоритет над <v>
+                    f = c.find(f_tag)
+                    if f is not None and f.text is not None:
+                        ftext = f.text
+                        value = '=' + ftext
+                        out.append(value if values_only else value)
+                        continue
+
+                    t = c.get("t")
+                    v = c.find(v_tag)
+                    if v is None:
+                        out.append(None)
+                        continue
+                    raw = v.text
+                    if raw is None:
+                        out.append(None)
+                        continue
+
+                    if t == "s":
+                        try:
+                            idx = int(raw)
+                            if 0 <= idx < len(self._shared_strings):
+                                value = self._shared_strings[idx]
+                            else:
+                                value = raw
+                        except (ValueError, TypeError):
+                            value = raw
+                    else:
+                        value = self._convert_cell_value(raw)
+
+                    out.append(value if values_only else raw)
+                yield tuple(out)
+                row.clear()
+
+    cdef object _convert_cell_value(self, str raw_value):
+        """Быстрое преобразование значения ячейки (используется в lazy-режиме)."""
         if not raw_value:
             return raw_value
+        try:
+            if '.' in raw_value or 'e' in raw_value.lower():
+                return float(raw_value)
+            return int(raw_value)
+        except (ValueError, OverflowError, TypeError):
+            return raw_value
 
-        cdef char first_char = ord(raw_value[0])
-        cdef int length = len(raw_value)
-
-        # Быстрая проверка: если начинается с цифры или минуса - вероятно число
-        if (48 <= first_char <= 57) or first_char == 45:  # '0'-'9' или '-'
-            # Проверяем наличие точки для float
-            if '.' in raw_value:
+    cdef object _convert_cell_value_fast(self, str raw_value):
+        """Максимально быстрый конвертер для парсинга всього листа."""
+        if not raw_value:
+            return raw_value
+        # Используем чисто Python-логику без cdef char для совместимости с Unicode
+        first_char = raw_value[0]
+        if first_char == '-' or ('0' <= first_char <= '9'):
+            if '.' in raw_value or 'e' in raw_value.lower():
                 try:
                     return float(raw_value)
                 except (ValueError, OverflowError):
                     return raw_value
             else:
-                # Для целых чисел проверяем длину
-                if length <= 9:  # Безопасно для int32
-                    try:
-                        return int(raw_value)
-                    except (ValueError, OverflowError):
-                        return raw_value
-                elif length <= 18:  # Может быть long
-                    try:
-                        return int(raw_value)
-                    except (ValueError, OverflowError):
-                        try:
-                            return float(raw_value)
-                        except (ValueError, OverflowError):
-                            return raw_value
-                else:
-                    # Очень длинное число - делаем float
-                    try:
-                        return float(raw_value)
-                    except (ValueError, OverflowError):
-                        return raw_value
-
-        # Если не число - возвращаем строку
+                try:
+                    return int(raw_value)
+                except (ValueError, OverflowError):
+                    return raw_value
         return raw_value
 
+    # ------------------------------------------------------------------
+    # Вспомогательные функции для координат и диапазонов
+    # ------------------------------------------------------------------
+
     cdef int _col_to_num(self, str col):
-        """Преобразует буквенную координату столбца в числовую"""
         cdef int num = 0
         cdef int c_val
-        for c in col:
-            c_val = ord(c)
-            # Convert lowercase to uppercase if needed
+        for ch in col:
+            c_val = ord(ch)
             if 97 <= c_val <= 122:  # a-z
-                c_val -= 32  # Convert to A-Z
+                c_val -= 32
             num = num * 26 + (c_val - ord('A') + 1)
         return num
 
     cdef str _num_to_col(self, int num):
-        """Преобразует числовую координату столбца в буквенную"""
         cdef str col = ""
         cdef int remainder
         while num > 0:
@@ -433,136 +521,99 @@ cdef class Worksheet:
         return col
 
     cdef tuple _parse_range(self, str range_string):
-        """
-        Разбирает строку диапазона на координаты начальной и конечной ячеек.
-
-        Returns:
-            tuple: (start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num)
-        """
-        # Разбираем диапазон
         cdef str start_ref, end_ref, start_col, end_col
         cdef int start_row, end_row, start_col_num, end_col_num, i
 
         start_ref, end_ref = range_string.split(':')
 
-        # Получаем координаты начальной ячейки
         i = 0
         while i < len(start_ref) and start_ref[i].isalpha():
             i += 1
         start_col = start_ref[:i]
         start_row = int(start_ref[i:])
 
-        # Получаем координаты конечной ячейки
         i = 0
         while i < len(end_ref) and end_ref[i].isalpha():
             i += 1
         end_col = end_ref[:i]
         end_row = int(end_ref[i:])
 
-        # Преобразуем буквенные координаты в числовые
         start_col_num = self._col_to_num(start_col)
         end_col_num = self._col_to_num(end_col)
 
         return (start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num)
 
+    # ------------------------------------------------------------------
+    # Merge / unmerge
+    # ------------------------------------------------------------------
+
     cpdef object merge_cells(self, str range_string):
-        """
-        Объединяет ячейки в указанном диапазоне.
-
-        Args:
-            range_string: Строка диапазона в формате 'A1:B2'
-
-        Returns:
-            Cell: Первая ячейка объединенного диапазона
-        """
-        from .cell import Cell
-
         cdef str start_ref, end_ref, start_col, end_col, col, cell_ref
         cdef int start_row, end_row, start_col_num, end_col_num, row, col_num
         cdef object cell
 
-        # Проверяем формат диапазона
         if ':' not in range_string:
             raise ValueError(f"Неверный формат диапазона: {range_string}. Ожидается формат 'A1:B2'")
 
-        # Добавляем диапазон в список объединенных ячеек
         if range_string not in self._merged_cells:
             self._merged_cells.append(range_string)
 
-        # Разбираем диапазон
         start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num = self._parse_range(range_string)
 
-        # Создаем или обновляем ячейки в диапазоне
         for row in range(start_row, end_row + 1):
             for col_num in range(start_col_num, end_col_num + 1):
                 col = self._num_to_col(col_num)
                 cell_ref = f"{col}{row}"
 
-                # Если ячейка не существует, создаем ее
                 if cell_ref not in self._cells:
                     cell = Cell(position=cell_ref, parent=self)
                     self._cells[cell_ref] = cell
                 else:
                     cell = self._cells[cell_ref]
 
-                # Помечаем ячейку как объединенную
                 cell.is_merged_cell = True
                 cell.merged_range = range_string
 
-                # Только первая ячейка содержит значение, остальные - пустые
                 if row != start_row or col_num != start_col_num:
                     cell.value = None
 
         return self._cells[start_ref]
 
     cpdef void unmerge_cells(self, str range_string):
-        """
-        Разъединяет ячейки в указанном диапазоне.
-
-        Args:
-            range_string: Строка диапазона в формате 'A1:B2'
-        """
         cdef str start_ref, end_ref, start_col, end_col, col, cell_ref
         cdef int start_row, end_row, start_col_num, end_col_num, row, col_num
         cdef object cell
 
-        # Проверяем, есть ли диапазон в списке объединенных ячеек
         if range_string not in self._merged_cells:
             return
 
-        # Удаляем диапазон из списка объединенных ячеек
         self._merged_cells.remove(range_string)
 
-        # Разбираем диапазон
         start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num = self._parse_range(range_string)
 
-        # Обновляем ячейки в диапазоне
         for row in range(start_row, end_row + 1):
             for col_num in range(start_col_num, end_col_num + 1):
                 col = self._num_to_col(col_num)
                 cell_ref = f"{col}{row}"
-
-                # Если ячейка существует, обновляем ее
                 if cell_ref in self._cells:
                     cell = self._cells[cell_ref]
                     cell.is_merged_cell = False
                     cell.merged_range = None
 
+    # ------------------------------------------------------------------
+    # Генерация XML sheetData (значення + mergeCells)
+    # ------------------------------------------------------------------
+
     cpdef bytes get_xml_data(self):
-        """
-        Оптимизированная генерация XML данных для листа.
-        """
         cdef dict rows_data = {}
-        cdef str cell_position, column, tag
+        cdef str cell_position, column, tag, escaped_value
         cdef int row, i
         cdef object cell_value
         cdef object cell
         cdef list cells_in_row, rows_xml, merged_cells_xml
 
-        # Группируем ячейки по строкам
         for cell_position, cell in self._cells.items():
             if cell.value is not None or cell.is_merged_cell:
-                # Более эффективное разделение позиции
                 i = 0
                 while i < len(cell_position) and cell_position[i].isalpha():
                     i += 1
@@ -572,45 +623,42 @@ cdef class Worksheet:
                 if row not in rows_data:
                     rows_data[row] = []
 
-                # Пропускаем объединенные ячейки, кроме первой
                 if cell.is_merged_cell and cell_position != cell.merged_range.split(':')[0]:
                     continue
 
                 cell_value = cell.value
 
-                # Подготовка атрибутов стиля
-                style_attrs = ""
-                if hasattr(cell, 'style') and cell.style is not None:
-                    # Здесь можно добавить атрибуты стиля в XML
-                    # Например, s="1" для ссылки на стиль в таблице стилей
-                    # В полной реализации нужно генерировать таблицу стилей и ссылаться на нее
-                    pass
-
-                # Быстрое определение типа данных
-                if isinstance(cell_value, (int, float)):
-                    tag = f'<c r="{cell_position}" t="n"{style_attrs}><v>{cell_value}</v></c>'
-                elif cell_value is not None:
-                    # Экранируем XML символы для строк
-                    escaped_value = str(cell_value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    tag = f'<c r="{cell_position}" t="str"{style_attrs}><v>{escaped_value}</v></c>'
+                # Формулы
+                if isinstance(cell_value, str) and cell_value.startswith('='):
+                    tag = f'<c r="{cell_position}"><f>{cell_value[1:]}</f></c>'
                 else:
-                    # Пустая ячейка
-                    tag = f'<c r="{cell_position}"{style_attrs}></c>'
+                    style_attrs = ""
+                    # TODO: подключить styles.xml и s="idx" позже
+
+                    if isinstance(cell_value, (int, float)):
+                        tag = f'<c r="{cell_position}" t="n"{style_attrs}><v>{cell_value}</v></c>'
+                    elif cell_value is not None:
+                        # строка
+                        escaped_value = str(cell_value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        tag = f'<c r="{cell_position}" t="str"{style_attrs}><v>{escaped_value}</v></c>'
+                    else:
+                        tag = f'<c r="{cell_position}"{style_attrs}></c>'
 
                 rows_data[row].append(tag)
 
-        # Генерируем строки XML
         rows_xml = []
         for row in sorted(rows_data.keys()):
             cells_in_row = rows_data[row]
             rows_xml.append(f'<row r="{row}">{"".join(cells_in_row)}</row>')
 
-        # Генерируем XML для объединенных ячеек
+        # Після генерації можна також оновити кеш max_row, max_column
+        if rows_data:
+            self._max_row = max(rows_data.keys())
+
         merged_cells_xml = []
         for merged_range in self._merged_cells:
             merged_cells_xml.append(f'<mergeCell ref="{merged_range}"/>')
 
-        # Добавляем секцию mergeCells, если есть объединенные ячейки
         merged_cells_section = ""
         if merged_cells_xml:
             merged_cells_section = f"""
@@ -618,8 +666,8 @@ cdef class Worksheet:
         {"".join(merged_cells_xml)}
     </mergeCells>"""
 
-        cdef str xml_content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        cdef str xml_content = f"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">
     <sheetData>
         {"".join(rows_xml)}
     </sheetData>{merged_cells_section}
