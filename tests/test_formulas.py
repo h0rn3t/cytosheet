@@ -17,6 +17,13 @@ def test_formula_write_read_roundtrip(tmp_path):
     ws['A2'] = 20
     ws['A3'] = '=SUM(A1:A2)'
 
+    # При прямой установке через __setitem__ data_type должен быть 'f'
+    assert getattr(ws['A3'], 'data_type', None) == 'f'
+
+    # Дополнительно проверим установку через .cell(row, column, value=...)
+    ws.cell(row=4, column=1, value='=A1+A2')
+    assert getattr(ws['A4'], 'data_type', None) == 'f'
+
     wb.save(str(file_path))
 
     wb2 = load_workbook(str(file_path))
@@ -39,6 +46,9 @@ def test_formula_iter_rows_lazy(tmp_path):
     ws['A2'] = 20
     ws['A3'] = '=SUM(A1:A2)'
 
+    # Убедимся, что при установке формулы data_type помечен как 'f'
+    assert getattr(ws['A3'], 'data_type', None) == 'f'
+
     wb.save(str(file_path))
 
     wb2 = load_workbook(str(file_path), lazy=True)
@@ -48,4 +58,3 @@ def test_formula_iter_rows_lazy(tmp_path):
 
     # Последняя строка должна содержать формулу как текст, не вычисленное значение
     assert rows[-1][0] == '=SUM(A1:A2)'
-

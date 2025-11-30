@@ -2,15 +2,16 @@ import os
 import timeit
 import sys
 import pytest
+import datetime
 
 # Add the src directory to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
 from openpyxl import load_workbook as openpyxl_load_workbook, Workbook as OpenpyxlWorkbook
 from cytosheet import (
-    Workbook, load_workbook, 
-    Color, Side, Border, Font, PatternFill, 
-    Alignment, Protection, Style
+    Workbook, load_workbook,
+    Color, Side, Border, Font, PatternFill,
+    Alignment, Protection, Style, DEFAULT_STYLE
 )
 
 def test_parse_xlsx():
@@ -19,7 +20,8 @@ def test_parse_xlsx():
 
     wb = load_workbook(test_file)
 
-    assert 'sheet1' == wb.get_sheet_by_name('Sheet1').title
+    # Имя листа теперь читается из xl/workbook.xml, там оно 'Sheet1'
+    assert 'Sheet1' == wb.get_sheet_by_name('Sheet1').title
 
 
 def test_read_cells():
@@ -29,7 +31,8 @@ def test_read_cells():
     # Тестирование cytosheet
     start = timeit.default_timer()
     wb = load_workbook(test_file)
-    ws = wb.get_sheet_by_name('Sheet1')
+    # избегаем deprecated get_sheet_by_name
+    ws = wb['Sheet1']
     assert ws['A2'].value == 1  # Приведение типов, если нужно
     stop = timeit.default_timer()
     cytosheet_time = stop - start
@@ -38,7 +41,8 @@ def test_read_cells():
     # Тестирование openpyxl
     start = timeit.default_timer()
     wb = openpyxl_load_workbook(test_file)
-    ws = wb.get_sheet_by_name('Sheet1')
+    # используем рекомендованный синтаксис индексации по имени
+    ws = wb['Sheet1']
     assert str(ws['A2'].value) == '1'  # Приведение типов
     stop = timeit.default_timer()
     openpyxl_time = stop - start
@@ -103,7 +107,8 @@ def test_lazy_iter_rows():
                              'file_example_XLSX_5000.xlsx')
 
     wb = load_workbook(test_file, lazy=True)   # новый режим
-    ws = wb.get_sheet_by_name('Sheet1')
+    # используем индексный доступ вместо get_sheet_by_name
+    ws = wb['Sheet1']
 
     rows = ws.iter_rows(values_only=True)
 
@@ -261,3 +266,106 @@ def test_merged_cell_with_style():
 
     # Clean up
     os.remove(file_path)
+
+def test_cell_number_format_property_proxy():
+    wb = Workbook()
+    ws = wb.active
+
+    cell = ws['A1']
+    cell.value = 123.456
+
+    # Устанавливаем формат числа через proxy
+    cell.number_format = '0.00%'
+
+    # Проверяем, что доступ через свойство и через style.numberFormat согласован
+    assert cell.number_format == '0.00%'
+    assert cell.style is not None
+    assert getattr(cell.style, 'numberFormat', None) == '0.00%'
+
+def test_number_format_roundtrip_with_openpyxl(tmp_path):
+    file_path = tmp_path / "number_format_test.xlsx"
+
+    # Создаём книгу через cytosheet и задаём number_format
+    wb = Workbook()
+    ws = wb.active
+
+    cell = ws['A1']
+    cell.value = 0.5
+    cell.number_format = '0.00%'
+
+    wb.save(str(file_path))
+
+    # Читаем через openpyxl и проверяем, что формат попал в styles.xml
+    wb_ox = openpyxl_load_workbook(str(file_path), data_only=False)
+    ws_ox = wb_ox.active
+    cell_ox = ws_ox['A1']
+
+    # openpyxl нормализует формат, но строка должна совпадать
+    assert cell_ox.number_format == '0.00%'
+
+def test_number_format_read_from_openpyxl_styles(tmp_path):
+    file_path = tmp_path / "number_format_from_openpyxl.xlsx"
+
+    # Сначала создаём файл через openpyxl с заданным number_format
+    wb_ox = OpenpyxlWorkbook()
+    ws_ox = wb_ox.active
+    cell_ox = ws_ox['A1']
+    cell_ox.value = 0.25
+    cell_ox.number_format = '0.00%'
+    wb_ox.save(str(file_path))
+
+    # Теперь читаем этот файл через cytosheet
+    wb = load_workbook(str(file_path))
+    ws = wb.active
+    cell = ws['A1']
+
+    # Значение может быть числом, формат должен подтянуться из styles.xml
+    assert cell.value == 0.25
+    assert getattr(cell, 'number_format', None) == '0.00%'
+
+def test_various_number_formats_roundtrip(tmp_path):
+    """Проверяем, что openpyxl -> файл -> cytosheet сохраняет number_format для разных типов."""
+    file_path = tmp_path / "various_number_formats.xlsx"
+
+    wb_ox = OpenpyxlWorkbook()
+    ws_ox = wb_ox.active
+
+    # Числа
+    ws_ox["A1"].value = 1234.567
+    ws_ox["A1"].number_format = "0.00"
+
+    ws_ox["A2"].value = 0.25
+    ws_ox["A2"].number_format = "0.00%"
+
+    ws_ox["A3"].value = 1000
+    ws_ox["A3"].number_format = "#,##0"
+
+    # Даты / время
+    ws_ox["B1"].value = datetime.date(2025, 1, 2)
+    ws_ox["B1"].number_format = "m/d/yy"
+
+    ws_ox["B2"].value = datetime.datetime(2025, 1, 2, 15, 30)
+    ws_ox["B2"].number_format = "m/d/yy h:mm"
+
+    # Текст с пользовательским форматом (не должен падать)
+    ws_ox["C1"].value = "Text"
+    ws_ox["C1"].number_format = "@"
+
+    wb_ox.save(str(file_path))
+
+    # Теперь читаем через cytosheet
+    wb = load_workbook(str(file_path))
+    ws = wb.active
+
+    # A1, A2, A3 — проверяем только формат
+    assert getattr(ws["A1"], "number_format", None) == "0.00"
+    assert getattr(ws["A2"], "number_format", None) == "0.00%"
+    assert getattr(ws["A3"], "number_format", None) == "#,##0"
+
+    # Для B1 и B2 значения могут отличаться по типу, поэтому проверяем только формат
+    assert getattr(ws["B1"], "number_format", None) == "m/d/yy"
+    assert getattr(ws["B2"], "number_format", None) == "m/d/yy h:mm"
+
+    # Текстовый формат '@' мы пока явно не поддерживаем, он может не подтянуться
+    # поэтому просто убеждаемся, что чтение не сломалось и значение есть
+    assert ws["C1"].value == "Text"
