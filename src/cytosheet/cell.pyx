@@ -11,12 +11,18 @@ cdef class Cell:
     def __init__(self, str position=None, object value=None, object style=None, object parent=None):
         self.position = position if position is not None else ""
         self.value = value
-        self.style = style
         self.parent = parent
         self.is_merged_cell = False
         self.merged_range = None
         self.data_type = None
         self._style_id = -1
+        # Всегда инициализируем стиль по умолчанию, если не передан явно
+        if style is None:
+            from .styles import DEFAULT_STYLE
+            # копируем дефолтный стиль, чтобы ячейки не разделали один и тот же объект
+            self.style = DEFAULT_STYLE
+        else:
+            self.style = style
 
     def __repr__(self):
         if self.is_merged_cell:
@@ -119,9 +125,7 @@ cdef class Cell:
 
     @font.setter
     def font(self, value):
-        if self.style is None:
-            from .styles import Style
-            self.style = Style()
+        # Стиль всегда существует, просто прокидываем ссылку
         self.style.font = value
 
     @property
@@ -130,9 +134,6 @@ cdef class Cell:
 
     @border.setter
     def border(self, value):
-        if self.style is None:
-            from .styles import Style
-            self.style = Style()
         self.style.border = value
 
     @property
@@ -141,9 +142,6 @@ cdef class Cell:
 
     @fill.setter
     def fill(self, value):
-        if self.style is None:
-            from .styles import Style
-            self.style = Style()
         self.style.fill = value
 
     @property
@@ -152,9 +150,6 @@ cdef class Cell:
 
     @alignment.setter
     def alignment(self, value):
-        if self.style is None:
-            from .styles import Style
-            self.style = Style()
         self.style.alignment = value
 
     @property
@@ -163,9 +158,6 @@ cdef class Cell:
 
     @protection.setter
     def protection(self, value):
-        if self.style is None:
-            from .styles import Style
-            self.style = Style()
         self.style.protection = value
 
     @property

@@ -268,6 +268,40 @@ cdef class Workbook:
         self._sheets[title] = new_sheet
         return new_sheet
 
+    def remove(self, object worksheet):
+        """Удалить лист из книги (API, совместимый с openpyxl).
+
+        Принимает объект Worksheet. Если лист не принадлежит этой книге,
+        выбрасывает ValueError.
+        """
+        cdef str key
+        cdef int idx
+        cdef list names
+
+        # Находим ключ по объекту листа
+        for key, ws in self._sheets.items():
+            if ws is worksheet:
+                # Определяем индекс удаляемого листа
+                names = list(self._sheets.keys())
+                idx = names.index(key)
+                del self._sheets[key]
+
+                # Корректируем active_sheet_index по правилам openpyxl:
+                # - если удалённый лист был активным и есть ещё листы,
+                #   активным становится предыдущий (или 0, если удалён первый)
+                # - если листов больше нет, индекс сбрасываем в 0
+                if len(self._sheets) == 0:
+                    self._active_sheet_index = 0
+                else:
+                    if self._active_sheet_index >= idx:
+                        if idx == 0:
+                            self._active_sheet_index = 0
+                        else:
+                            self._active_sheet_index = idx - 1
+                return
+
+        raise ValueError("The worksheet does not exist in this workbook.")
+
     @property
     def active(self):
         """
@@ -283,11 +317,15 @@ cdef class Workbook:
         raise IndexError("No active sheet available")
 
     def remove_sheet(self, str title):
+        """Удаляет лист по имени (устаревший API; оставлен для обратной совместимости).
+
+        В openpyxl remove_sheet был заменён на remove(worksheet), поэтому тут
+        просто ищем лист по имени и делегируем в remove().
         """
-        Removes a worksheet from the workbook by title.
-        """
+        cdef object ws
         if title in self._sheets:
-            del self._sheets[title]
+            ws = self._sheets[title]
+            self.remove(ws)
         else:
             raise ValueError(f"Worksheet '{title}' does not exist in workbook.")
 

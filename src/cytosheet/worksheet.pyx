@@ -1355,7 +1355,11 @@ cdef class Worksheet:
                 if hasattr(cell, '_style_id') and getattr(cell, '_style_id') is not None and getattr(cell, '_style_id') >= 0:
                     style_attr = f' s="{cell._style_id}"'
 
-                if isinstance(cell_value, str) and cell_value.startswith('='):
+                # Булевые значения должны сериализоваться как t="b" c 1/0,
+                # иначе openpyxl пытается парсить "True"/"False" как число и падает.
+                if isinstance(cell_value, bool):
+                    tag = f'<c r="{cell_position}" t="b"{style_attr}><v>{"1" if cell_value else "0"}</v></c>'
+                elif isinstance(cell_value, str) and cell_value.startswith('='):
                     tag = f'<c r="{cell_position}"{style_attr}><f>{cell_value[1:]}</f></c>'
                 else:
                     if isinstance(cell_value, (int, float)):

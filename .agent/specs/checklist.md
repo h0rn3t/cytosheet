@@ -40,17 +40,17 @@
 
 ### 1.5 API load_workbook (совместимость с openpyxl)
 
-- [ ] LW-001 Сигнатура `load_workbook(filename, read_only=False, keep_vba=False, data_only=False, keep_links=True, rich_text=False)`
-- [ ] LW-002 Аргумент `read_only` маппится на внутренний `lazy`
-- [ ] LW-003 Остальные аргументы принимаются и игнорируются без ошибок
+- [x] LW-001 Сигнатура `load_workbook(filename, read_only=False, keep_vba=False, data_only=False, keep_links=True, rich_text=False)`
+- [x] LW-002 Аргумент `read_only` маппится на внутренний `lazy`
+- [x] LW-003 Остальные аргументы принимаются и игнорируются без ошибок
 
 ### 1.6 Cell proxies к стилям
 
-- [ ] CP-001 `cell.font` (proxy к `cell.style.font`)
-- [ ] CP-002 `cell.alignment` (proxy к `cell.style.alignment`)
-- [ ] CP-003 `cell.border` (proxy к `cell.style.border`)
-- [ ] CP-004 `cell.fill` (proxy к `cell.style.fill`)
-- [ ] CP-005 `cell.protection` (proxy к `cell.style.protection`)
+- [x] CP-001 `cell.font` (proxy к `cell.style.font`)
+- [x] CP-002 `cell.alignment` (proxy к `cell.style.alignment`)
+- [x] CP-003 `cell.border` (proxy к `cell.style.border`)
+- [x] CP-004 `cell.fill` (proxy к `cell.style.fill`)
+- [x] CP-005 `cell.protection` (proxy к `cell.style.protection`)
 
 ## 2. Очень желательно для 1.0 (можно перенести в 1.1)
 
@@ -70,3 +70,4 @@
 - 2025-11-30: Реализованы WS-001, WS-002, WS-004, WS-006, WS-007, WS-008, WS-009 (Worksheet bounds, append, rows/cols/values, диапазоны).
 - 2025-11-30: Реализованы WS-003 (dimensions) и WS-005 (iter_cols) + дополнительные тесты на итерацию и диапазоны.
 - 2025-11-30: Реализованы DM-001..DM-007 (row_dimensions/column_dimensions API, парсинг/генерация <row>/<col>, совместимость с openpyxl).
+- 2025-12-02: Реализованы LW-001..LW-003 (совместимый load_workbook) и CP-001..CP-005 (cell style proxies).
