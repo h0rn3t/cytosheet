@@ -13,29 +13,60 @@
 
 ## Поточний стан (v0.1.0)
 
+### 📊 Совместимость API с openpyxl
+
+**Дата оценки**: 2025-12-05
+
+- **Базовый API (Core)**: ~65% совместимость
+- **Реальные табличные сценарии**: ~90-95% совместимость
+- **Полный API openpyxl**: ~45% совместимость
+
+Детальный анализ: см. `.agent/api_compatibility_analysis.md`
+
 ### ✅ Реалізовано
 
-- Базова структура (Workbook, Worksheet, Cell)
-- Читання XLSX файлів з підтримкою lazy loading
-- Запис XLSX файлів
-- Базові стилі (Font, Border, PatternFill, Alignment, Protection)
-- Об'єднання ячейок (merge_cells/unmerge_cells)
-- Shared strings підтримка
-- Оптимізований парсинг (chunked для великих файлів)
+#### Core API (полная поддержка)
+- Базова структура (Workbook, Worksheet, Cell) ✅
+- Читання XLSX файлів з підтримкою lazy loading ✅
+- Запис XLSX файлів (включая save_virtual_workbook) ✅
+- Базові стилі (Font, Border, PatternFill, Alignment, Protection, Color, Side) ✅
+- Об'єднання ячейок (merge_cells/unmerge_cells) ✅
+- Shared strings підтримка ✅
+- Оптимізований парсинг (chunked для великих файлів) ✅
+- **Формули** - запис/читання формул (data_type='f', XML <f> теги) ✅
+- **NumberFormat** - форматування чисел через cell.number_format ✅
+- **Row/Column dimensions** - висота/ширина/приховування рядків і колонок ✅
+- **Ітератори** - iter_rows, iter_cols, rows, columns, values ✅
+- **Діапазони** - доступ до діапазонів ws['A1:C3'] ✅
+- **append()** метод для додавання рядків ✅
+- **max_row, max_column** - визначення меж даних ✅
 
-### ❌ Відсутнє (критичне для сумісності)
+#### Совместимость по категориям
+- Workbook API: 52% (11/21 полностью + 3/21 частично)
+- Worksheet API: 48% (23/48 полностью + 5/48 частично)
+- Cell API: 82% (14/17 полностью + 2/17 частично)
+- Styles API: 80% (8/10 полностью + 1/10 частично)
 
-- Формули
-- Діаграми (Charts)
-- Зображення (Images)
-- Умовне форматування (Conditional Formatting)
-- Data validation
-- Коментарі
-- Захист аркушів
-- Іменовані діапазони
-- Фільтри та сортування
-- Pivot tables
-- Повна підтримка стилів (NumberFormat, etc.)
+### ❌ Відсутнє (критичне для повної сумісності)
+
+#### High Priority (Milestone 2-3)
+- Freeze panes - закріплення областей ❌
+- Insert/Delete rows/cols - вставка/удаление строк/колонок ❌
+- Auto filter - автофільтри ❌
+- Data validation - перевірка даних ❌
+- Conditional formatting - умовне форматування ❌
+- Copy worksheet - копіювання аркушів ❌
+
+#### Advanced Features (Milestone 4+)
+- Діаграми (Charts) - всі типи ❌
+- Зображення (Images) ❌
+- Коментарі (Comments) ❌
+- Захист аркушів (Protection) - частково 🟡
+- Іменовані діапазони (Named ranges) ❌
+- Page setup - налаштування друку ❌
+- Фільтри та сортування ❌
+- Pivot tables ❌
+- Gradient fills ❌
 
 ## Швидкий старт для розробки
 
