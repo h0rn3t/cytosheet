@@ -8,6 +8,7 @@ src/cytosheet.egg-info/requires.txt
 src/cytosheet.egg-info/top_level.txt
 tests/test_cell_style_proxies.py
 tests/test_dimensions.py
+tests/test_examples_integration.py
 tests/test_formulas.py
 tests/test_load_workbook_and_styles.py
 tests/test_worksheet_api.py

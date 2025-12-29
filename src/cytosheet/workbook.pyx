@@ -256,8 +256,6 @@ cdef class Workbook:
                 if fmt_code is not None:
                     self._xf_numfmt_map[idx] = fmt_code
 
-        print("[DEBUG] _xf_numfmt_map:", self._xf_numfmt_map)
-
     def create_sheet(self, str title = None):
         """
         Creates a new worksheet with an optional title.

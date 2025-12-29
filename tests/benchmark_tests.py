@@ -1,5 +1,5 @@
 """
-Упрощенные бенчмарки для локального тестирования cytosheet vs openpyxl
+Спрощені бенчмарки для локального тестування cytosheet vs openpyxl
 """
 
 import os
@@ -22,26 +22,26 @@ try:
         Alignment, Protection, Style
     )
 except ImportError as e:
-    print(f"Ошибка импорта: {e}")
-    print("Убедитесь, что все зависимости установлены и cytosheet скомпилирован")
+    print(f"Помилка імпорту: {e}")
+    print("Переконайтеся, що всі залежності встановлені та cytosheet скомпільований")
     sys.exit(1)
 
 
 class SimpleBenchmark:
     def __init__(self, test_size: int = 1000):
         """
-        Простой бенчмарк для тестирования производительности
+        Простий бенчмарк для тестування продуктивності
 
         Args:
-            test_size: Количество строк в тестовом файле
+            test_size: Кількість рядків у тестовому файлі
         """
         self.test_size = test_size
         self.test_file = f"simple_test_{test_size}.xlsx"
-        print(f"🚀 Инициализация бенчмарка для {test_size} строк")
+        print(f"🚀 Ініціалізація бенчмарка для {test_size} рядків")
 
     def generate_simple_data(self) -> List[List[Any]]:
-        """Генерация простых тестовых данных"""
-        print(f"📊 Генерация {self.test_size} строк тестовых данных...")
+        """Генерація простих тестових даних"""
+        print(f"📊 Генерація {self.test_size} рядків тестових даних...")
 
         data = [["ID", "Name", "Age", "Score"]]  # Заголовки
 
@@ -59,8 +59,8 @@ class SimpleBenchmark:
         return data
 
     def create_test_file_cytosheet(self, data: List[List[Any]]) -> None:
-        """Создание тестового файла с помощью cytosheet"""
-        print(f"📝 Создание файла {self.test_file} (cytosheet)...")
+        """Створення тестового файлу за допомогою cytosheet"""
+        print(f"📝 Створення файлу {self.test_file} (cytosheet)...")
 
         try:
             wb = Workbook()
@@ -68,20 +68,20 @@ class SimpleBenchmark:
 
             for row_idx, row_data in enumerate(data, 1):
                 for col_idx, value in enumerate(row_data, 1):
-                    # Используем openpyxl-совместное API .cell(row, column)
+                    # Використовуємо openpyxl-сумісне API .cell(row, column)
                     ws.cell(row=row_idx, column=col_idx, value=value)
 
             wb.save(self.test_file)
-            print(f"✅ Файл {self.test_file} создан успешно!")
+            print(f"✅ Файл {self.test_file} створено успішно!")
 
         except Exception as e:
-            print(f"❌ Ошибка создания файла: {e}")
+            print(f"❌ Помилка створення файлу: {e}")
             traceback.print_exc()
             raise
 
     def time_function(self, func, *args, **kwargs) -> Tuple[Any, float]:
-        """Измерение времени выполнения функции"""
-        gc.collect()  # Очистка мусора перед тестом
+        """Вимірювання часу виконання функції"""
+        gc.collect()  # Очищення сміття перед тестом
 
         start_time = time.perf_counter()
         try:
@@ -90,13 +90,13 @@ class SimpleBenchmark:
             return result, end_time - start_time
         except Exception as e:
             end_time = time.perf_counter()
-            print(f"❌ Ошибка в функции: {e}")
+            print(f"❌ Помилка у функції: {e}")
             return None, end_time - start_time
 
-    # ================== ТЕСТ 1: ЧТЕНИЕ ФАЙЛА ==================
+    # ================== ТЕСТ 1: ЧИТАННЯ ФАЙЛУ ==================
 
     def test_read_cytosheet(self) -> Tuple[int, float]:
-        """Тест чтения файла через cytosheet"""
+        """Тест читання файлу через cytosheet"""
 
         def read_operation():
             wb = load_workbook(self.test_file)
@@ -114,7 +114,7 @@ class SimpleBenchmark:
         return result or 0, exec_time
 
     def test_read_openpyxl(self) -> Tuple[int, float]:
-        """Тест чтения файла через openpyxl"""
+        """Тест читання файлу через openpyxl"""
 
         def read_operation():
             wb = openpyxl_load_workbook(self.test_file)
@@ -132,10 +132,10 @@ class SimpleBenchmark:
         result, exec_time = self.time_function(read_operation)
         return result or 0, exec_time
 
-    # ================== ТЕСТ 2: ПОИСК ДАННЫХ ==================
+    # ================== ТЕСТ 2: ПОШУК ДАНИХ ==================
 
     def test_search_cytosheet(self, search_name: str = "Alice") -> Tuple[int, float]:
-        """Тест поиска данных через cytosheet"""
+        """Тест пошуку даних через cytosheet"""
 
         def search_operation():
             wb = load_workbook(self.test_file, lazy=True)
@@ -150,7 +150,7 @@ class SimpleBenchmark:
                     if len(row_data) > 1 and row_data[1] == search_name:
                         found_count += 1
             except Exception as e:
-                print(f"Ошибка в поиске cytosheet: {e}")
+                print(f"Помилка у пошуку cytosheet: {e}")
             finally:
                 wb.close() if hasattr(wb, 'close') else None
 
@@ -160,7 +160,7 @@ class SimpleBenchmark:
         return result or 0, exec_time
 
     def test_search_openpyxl(self, search_name: str = "Alice") -> Tuple[int, float]:
-        """Тест поиска данных через openpyxl"""
+        """Тест пошуку даних через openpyxl"""
 
         def search_operation():
             wb = openpyxl_load_workbook(self.test_file, read_only=True)
@@ -180,16 +180,16 @@ class SimpleBenchmark:
         result, exec_time = self.time_function(search_operation)
         return result or 0, exec_time
 
-    # ================== ТЕСТ 3: СОЗДАНИЕ ФАЙЛА ==================
+    # ================== ТЕСТ 3: СТВОРЕННЯ ФАЙЛУ ==================
 
     def test_create_cytosheet(self, output_file: str) -> float:
-        """Тест создания файла через cytosheet"""
+        """Тест створення файлу через cytosheet"""
 
         def create_operation():
             wb = Workbook()
             ws = wb.active
 
-            # Простые данные
+            # Прості дані
             data = [
                 ["New_ID", "New_Name", "New_Value"],
                 [1, "Test1", 100],
@@ -207,13 +207,13 @@ class SimpleBenchmark:
         return exec_time
 
     def test_create_openpyxl(self, output_file: str) -> float:
-        """Тест создания файла через openpyxl"""
+        """Тест створення файлу через openpyxl"""
 
         def create_operation():
             wb = OpenpyxlWorkbook()
             ws = wb.active
 
-            # Простые данные
+            # Прості дані
             data = [
                 ["New_ID", "New_Name", "New_Value"],
                 [1, "Test1", 100],
@@ -229,92 +229,92 @@ class SimpleBenchmark:
         _, exec_time = self.time_function(create_operation)
         return exec_time
 
-    # ================== ЗАПУСК ВСЕХ ТЕСТОВ ==================
+    # ================== ЗАПУСК УСІХ ТЕСТІВ ==================
 
     def run_all_tests(self) -> Dict[str, Any]:
-        """Запуск всех тестов"""
+        """Запуск усіх тестів"""
         print(f"\n{'=' * 60}")
-        print(f"🎯 ЗАПУСК ТЕСТОВ ({self.test_size} строк)")
+        print(f"🎯 ЗАПУСК ТЕСТІВ ({self.test_size} рядків)")
         print(f"{'=' * 60}")
 
         results = {}
 
         try:
-            # Генерируем и создаем тестовый файл
+            # Генеруємо та створюємо тестовий файл
             test_data = self.generate_simple_data()
             self.create_test_file_cytosheet(test_data)
 
-            # ТЕСТ 1: Чтение файла
-            print(f"\n📖 ТЕСТ 1: Чтение файла")
-            print("-" * 30)
+            # # ТЕСТ 1: Читання файлу
+            # print(f"\n📖 ТЕСТ 1: Читання файлу")
+            # print("-" * 30)
 
-            print("  Cytosheet...")
-            cyto_read_count, cyto_read_time = self.test_read_cytosheet()
-            print(f"    Время: {cyto_read_time:.4f}s, Ячеек: {cyto_read_count}")
+            # print("  Cytosheet...")
+            # cyto_read_count, cyto_read_time = self.test_read_cytosheet()
+            # print(f"    Час: {cyto_read_time:.4f}s, Комірок: {cyto_read_count}")
 
-            print("  OpenPyXL...")
-            openpyxl_read_count, openpyxl_read_time = self.test_read_openpyxl()
-            print(f"    Время: {openpyxl_read_time:.4f}s, Ячеек: {openpyxl_read_count}")
+            # print("  OpenPyXL...")
+            # openpyxl_read_count, openpyxl_read_time = self.test_read_openpyxl()
+            # print(f"    Час: {openpyxl_read_time:.4f}s, Комірок: {openpyxl_read_count}")
 
-            results['read_test'] = {
-                'cytosheet': {'time': cyto_read_time, 'cells': cyto_read_count},
-                'openpyxl': {'time': openpyxl_read_time, 'cells': openpyxl_read_count}
-            }
+            # results['read_test'] = {
+            #     'cytosheet': {'time': cyto_read_time, 'cells': cyto_read_count},
+            #     'openpyxl': {'time': openpyxl_read_time, 'cells': openpyxl_read_count}
+            # }
 
-            # ТЕСТ 2: Поиск данных
-            print(f"\n🔍 ТЕСТ 2: Поиск данных")
-            print("-" * 30)
+            # # ТЕСТ 2: Пошук даних
+            # print(f"\n🔍 ТЕСТ 2: Пошук даних")
+            # print("-" * 30)
 
-            search_name = "Alice"
-            print(f"  Ищем: '{search_name}'")
+            # search_name = "Alice"
+            # print(f"  Шукаємо: '{search_name}'")
 
-            print("  Cytosheet...")
-            cyto_search_count, cyto_search_time = self.test_search_cytosheet(search_name)
-            print(f"    Время: {cyto_search_time:.4f}s, Найдено: {cyto_search_count}")
+            # print("  Cytosheet...")
+            # cyto_search_count, cyto_search_time = self.test_search_cytosheet(search_name)
+            # print(f"    Час: {cyto_search_time:.4f}s, Знайдено: {cyto_search_count}")
 
-            print("  OpenPyXL...")
-            openpyxl_search_count, openpyxl_search_time = self.test_search_openpyxl(search_name)
-            print(f"    Время: {openpyxl_search_time:.4f}s, Найдено: {openpyxl_search_count}")
+            # print("  OpenPyXL...")
+            # openpyxl_search_count, openpyxl_search_time = self.test_search_openpyxl(search_name)
+            # print(f"    Час: {openpyxl_search_time:.4f}s, Знайдено: {openpyxl_search_count}")
 
-            results['search_test'] = {
-                'cytosheet': {'time': cyto_search_time, 'found': cyto_search_count},
-                'openpyxl': {'time': openpyxl_search_time, 'found': openpyxl_search_count}
-            }
+            # results['search_test'] = {
+            #     'cytosheet': {'time': cyto_search_time, 'found': cyto_search_count},
+            #     'openpyxl': {'time': openpyxl_search_time, 'found': openpyxl_search_count}
+            # }
 
-            # ТЕСТ 3: Создание файла
-            print(f"\n📝 ТЕСТ 3: Создание файла")
+            # ТЕСТ 3: Створення файлу
+            print(f"\n📝 ТЕСТ 3: Створення файлу")
             print("-" * 30)
 
             print("  Cytosheet...")
             cyto_create_time = self.test_create_cytosheet("test_create_cyto.xlsx")
-            print(f"    Время: {cyto_create_time:.4f}s")
+            print(f"    Час: {cyto_create_time:.4f}s")
 
             print("  OpenPyXL...")
             openpyxl_create_time = self.test_create_openpyxl("test_create_openpyxl.xlsx")
-            print(f"    Время: {openpyxl_create_time:.4f}s")
+            print(f"    Час: {openpyxl_create_time:.4f}s")
 
             results['create_test'] = {
                 'cytosheet': {'time': cyto_create_time},
                 'openpyxl': {'time': openpyxl_create_time}
             }
 
-            # Показываем сравнение
+            # Показуємо порівняння
             self.print_comparison(results)
 
             return results
 
         except Exception as e:
-            print(f"❌ Ошибка в тестах: {e}")
+            print(f"❌ Помилка у тестах: {e}")
             traceback.print_exc()
             return {}
         finally:
-            # Очистка временных файлов
+            # Очищення тимчасових файлів
             self.cleanup_files()
 
     def print_comparison(self, results: Dict[str, Any]) -> None:
-        """Вывод сравнения результатов"""
+        """Виведення порівняння результатів"""
         print(f"\n{'=' * 60}")
-        print("📊 СРАВНЕНИЕ РЕЗУЛЬТАТОВ")
+        print("📊 ПОРІВНЯННЯ РЕЗУЛЬТАТІВ")
         print(f"{'=' * 60}")
 
         for test_name, data in results.items():
@@ -329,10 +329,10 @@ class SimpleBenchmark:
                     print(f"\n{test_name.replace('_', ' ').title()}:")
                     print(f"  Cytosheet: {cyto_time:.4f}s")
                     print(f"  OpenPyXL:  {openpyxl_time:.4f}s")
-                    print(f"  Быстрее:   {faster} в {abs(speedup):.2f}x раз")
+                    print(f"  Швидше:   {faster} у {abs(speedup):.2f}x разів")
 
     def cleanup_files(self) -> None:
-        """Очистка временных файлов"""
+        """Очищення тимчасових файлів"""
         files_to_remove = [
             self.test_file,
             "test_create_cyto.xlsx",
@@ -343,24 +343,24 @@ class SimpleBenchmark:
             try:
                 if os.path.exists(file):
                     os.remove(file)
-                    print(f"🗑 Удален: {file}")
+                    print(f"🗑 Видалено: {file}")
             except Exception as e:
-                print(f"⚠ Не удалось удалить {file}: {e}")
+                print(f"⚠ Не вдалося видалити {file}: {e}")
 
 
 def main():
-    """Главная функция"""
-    print("🚀 ПРОСТЫЕ БЕНЧМАРКИ CYTOSHEET vs OPENPYXL")
+    """Головна функція"""
+    print("🚀 ПРОСТІ БЕНЧМАРКИ CYTOSHEET vs OPENPYXL")
     print("=" * 60)
 
-    # Различные размеры для тестирования
+    # Різні розміри для тестування
     test_sizes = [100, 500, 1000, 10000, 100000]
 
     all_results = {}
 
     for size in test_sizes:
         print(f"\n{'=' * 80}")
-        print(f"🎯 ТЕСТИРОВАНИЕ С {size} СТРОКАМИ")
+        print(f"🎯 ТЕСТУВАННЯ З {size} РЯДКАМИ")
         print(f"{'=' * 80}")
 
         try:
@@ -368,20 +368,20 @@ def main():
             results = benchmark.run_all_tests()
             all_results[size] = results
 
-            print(f"✅ Тесты с {size} строками завершены")
+            print(f"✅ Тести з {size} рядками завершено")
 
         except Exception as e:
-            print(f"❌ Ошибка в тестах с {size} строками: {e}")
+            print(f"❌ Помилка у тестах з {size} рядками: {e}")
             traceback.print_exc()
 
-    # Общая сводка
+    # Загальна зведена інформація
     print(f"\n{'=' * 80}")
-    print("🏆 ОБЩАЯ СВОДКА")
+    print("🏆 ЗАГАЛЬНА ЗВЕДЕНА ІНФОРМАЦІЯ")
     print(f"{'=' * 80}")
 
     for size, results in all_results.items():
         if results:
-            print(f"\n📊 {size} строк:")
+            print(f"\n📊 {size} рядків:")
             for test_name, data in results.items():
                 if 'cytosheet' in data and 'openpyxl' in data:
                     cyto_time = data['cytosheet']['time']
@@ -389,22 +389,22 @@ def main():
 
                     if cyto_time > 0 and openpyxl_time > 0:
                         speedup = openpyxl_time / cyto_time
-                        status = "быстрее" if speedup > 1 else "медленнее"
-                        print(f"  {test_name}: Cytosheet {status} в {abs(speedup):.2f}x")
+                        status = "швидше" if speedup > 1 else "повільніше"
+                        print(f"  {test_name}: Cytosheet {status} у {abs(speedup):.2f}x")
 
 
-# Performance tests from test_performance.py
+# Тести продуктивності з test_performance.py
 #
 # def test_merge_cells_performance():
-#     """Test the performance of merge_cells method."""
-#     # Create a new workbook
+#     """Тест продуктивності методу merge_cells."""
+#     # Створюємо нову книгу
 #     wb = Workbook()
 #     ws = wb.active
 #
-#     # Set values in cells
+#     # Встановлюємо значення у комірки
 #     ws['A1'] = 'Merged Cell'
 #
-#     # Measure the time to merge cells
+#     # Вимірюємо час об'єднання комірок
 #     start_time = time.time()
 #     for i in range(1, 101):
 #         range_string = f'A{i}:C{i+2}'
@@ -412,9 +412,9 @@ def main():
 #     end_time = time.time()
 #
 #     merge_time = end_time - start_time
-#     print(f"Time to merge 100 cell ranges: {merge_time:.4f} seconds")
+#     print(f"Час об'єднання 100 діапазонів комірок: {merge_time:.4f} секунд")
 #
-#     # Measure the time to unmerge cells
+#     # Вимірюємо час роз'єднання комірок
 #     start_time = time.time()
 #     for i in range(1, 101):
 #         range_string = f'A{i}:C{i+2}'
@@ -422,19 +422,19 @@ def main():
 #     end_time = time.time()
 #
 #     unmerge_time = end_time - start_time
-#     print(f"Time to unmerge 100 cell ranges: {unmerge_time:.4f} seconds")
+#     print(f"Час роз'єднання 100 діапазонів комірок: {unmerge_time:.4f} секунд")
 #
-#     # Assert that the operations completed in a reasonable time
-#     assert merge_time < 1.0, f"Merge operation took too long: {merge_time:.4f} seconds"
-#     assert unmerge_time < 1.0, f"Unmerge operation took too long: {unmerge_time:.4f} seconds"
+#     # Перевіряємо, що операції завершилися за розумний час
+#     assert merge_time < 1.0, f"Операція об'єднання зайняла занадто багато часу: {merge_time:.4f} секунд"
+#     assert unmerge_time < 1.0, f"Операція роз'єднання зайняла занадто багато часу: {unmerge_time:.4f} секунд"
 #
 # def test_style_performance():
-#     """Test the performance of style-related methods."""
-#     # Create a new workbook
+#     """Тест продуктивності методів, пов'язаних зі стилями."""
+#     # Створюємо нову книгу
 #     wb = Workbook()
 #     ws = wb.active
 #
-#     # Create a style
+#     # Створюємо стиль
 #     font = Font(name='Arial', size=12, bold=True, italic=True)
 #     border = Border(
 #         left=Side(style='thin', color=Color(rgb='FF0000')),
@@ -447,7 +447,7 @@ def main():
 #     protection = Protection(locked=True, hidden=False)
 #     style = Style(font=font, border=border, fill=fill, alignment=alignment, protection=protection)
 #
-#     # Measure the time to apply styles to cells
+#     # Вимірюємо час застосування стилів до комірок
 #     start_time = time.time()
 #     for i in range(1, 1001):
 #         cell_ref = f'A{i}'
@@ -456,9 +456,9 @@ def main():
 #     end_time = time.time()
 #
 #     style_time = end_time - start_time
-#     print(f"Time to apply styles to 1000 cells: {style_time:.4f} seconds")
+#     print(f"Час застосування стилів до 1000 комірок: {style_time:.4f} секунд")
 #
-#     # Measure the time to access style properties
+#     # Вимірюємо час доступу до властивостей стилю
 #     start_time = time.time()
 #     for i in range(1, 1001):
 #         cell_ref = f'A{i}'
@@ -470,15 +470,15 @@ def main():
 #     end_time = time.time()
 #
 #     access_time = end_time - start_time
-#     print(f"Time to access style properties of 1000 cells: {access_time:.4f} seconds")
+#     print(f"Час доступу до властивостей стилю 1000 комірок: {access_time:.4f} секунд")
 #
-#     # Assert that the operations completed in a reasonable time
-#     assert style_time < 2.0, f"Style application took too long: {style_time:.4f} seconds"
-#     assert access_time < 2.0, f"Style access took too long: {access_time:.4f} seconds"
+#     # Перевіряємо, що операції завершилися за розумний час
+#     assert style_time < 2.0, f"Застосування стилю зайняло занадто багато часу: {style_time:.4f} секунд"
+#     assert access_time < 2.0, f"Доступ до стилю зайняв занадто багато часу: {access_time:.4f} секунд"
 #
 # def test_border_add_performance():
-#     """Test the performance of the Border.__add__ method."""
-#     # Create borders
+#     """Тест продуктивності методу Border.__add__."""
+#     # Створюємо рамки
 #     border1 = Border(
 #         left=Side(style='thin', color=Color(rgb='FF0000')),
 #         right=Side(style='thin', color=Color(rgb='FF0000'))
@@ -488,21 +488,21 @@ def main():
 #         bottom=Side(style='thin', color=Color(rgb='0000FF'))
 #     )
 #
-#     # Measure the time to add borders
+#     # Вимірюємо час додавання рамок
 #     start_time = time.time()
 #     for _ in range(10000):
 #         result = border1 + border2
 #     end_time = time.time()
 #
 #     add_time = end_time - start_time
-#     print(f"Time to add borders 10000 times: {add_time:.4f} seconds")
+#     print(f"Час додавання рамок 10000 разів: {add_time:.4f} секунд")
 #
-#     # Assert that the operation completed in a reasonable time
-#     assert add_time < 1.0, f"Border addition took too long: {add_time:.4f} seconds"
+#     # Перевіряємо, що операція завершилася за розумний час
+#     assert add_time < 1.0, f"Додавання рамки зайняло занадто багато часу: {add_time:.4f} секунд"
 
 if __name__ == "__main__":
     main()
-    # Uncomment to run performance tests
+    # Розкоментуйте для запуску тестів продуктивності
     # test_merge_cells_performance()
     # test_style_performance()
     # test_border_add_performance()
