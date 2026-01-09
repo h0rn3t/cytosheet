@@ -16,7 +16,6 @@ authors = [
 ]
 license = { text = "MIT" }
 dependencies = [
-    "Cython>=3.0.11",
     "lxml>=4.9"
 ]
 
