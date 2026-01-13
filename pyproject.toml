@@ -16,7 +16,9 @@ authors = [
 ]
 license = { text = "MIT" }
 dependencies = [
-    "lxml>=4.9"
+    "lxml>=4.9",
+    "Cython>=3.0.11",
+    "pyximport"
 ]
 
 [project.urls]
