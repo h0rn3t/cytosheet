@@ -933,9 +933,14 @@ cdef class Worksheet:
     # Доступ і запис ячеек
     # ------------------------------------------------------------------
 
-    def __getitem__(self, str key):
-        """Поддержка одиночной ячейки и диапазонов, как в openpyxl."""
+    def __getitem__(self, key):
+        """Поддержка одиночной ячейки, диапазонов и доступа по номеру строки, как в openpyxl."""
         cdef object cell
+        
+        # Поддержка доступа по номеру строки: ws[1] возвращает генератор ячеек строки
+        if isinstance(key, int):
+            return next(self.iter_rows(min_row=key, max_row=key))
+        
         # Диапазон вида "A1:C3"
         if ":" in key:
             return self._get_range(key)

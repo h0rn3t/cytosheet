@@ -4,7 +4,7 @@ from .workbook import Workbook
 # Совместимый с openpyxl API: поддерживаем read_only, а также синоним lazy для внутренних тестов.
 # Остальные аргументы принимаем и игнорируем без ошибки.
 def load_workbook(
-    str filename,
+    filename,
     bint read_only=False,
     bint keep_vba=False,
     bint data_only=False,
@@ -20,6 +20,10 @@ def load_workbook(
     Зараз використовується тільки read_only / lazy. Інші аргументи приймаються
     і ігноруються без помилки.
     """
+    # Поддержка Path объектов (pathlib.Path, PosixPath, WindowsPath)
+    if hasattr(filename, '__fspath__'):
+        filename = str(filename)
+    
     cdef object archive = ZipFile(filename, 'r')
     # Поддерживаем оба способа задания lazy/read_only: если явно указан lazy=True,
     # он имеет приоритет над read_only для внутреннего флага.
