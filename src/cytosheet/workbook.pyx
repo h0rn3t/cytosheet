@@ -17,6 +17,7 @@ cdef str CONTENT_TYPES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" st
     <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
     <Default Extension="xml" ContentType="application/xml"/>
     <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+    <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
     {sheet_overrides}
 </Types>"""
 
@@ -353,8 +354,9 @@ cdef class Workbook:
         cdef int i
         cdef object sheet
 
+        # rId начинается с 2, т.к. rId1 занят styles.xml
         for i, sheet in enumerate(self._sheets.values()):
-            elements.append(f'<sheet name="{sheet.title}" sheetId="{i + 1}" r:id="rId{i + 1}"/>')
+            elements.append(f'<sheet name="{sheet.title}" sheetId="{i + 1}" r:id="rId{i + 2}"/>')
 
         return "".join(elements)
 
@@ -381,11 +383,19 @@ cdef class Workbook:
         cdef int i
         cdef object sheet
 
+        # Добавляем relationship для styles.xml
+        relationships.append(
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+            'Target="styles.xml"/>'
+        )
+
+        # Добавляем relationships для листов (начиная с rId2)
         for i, sheet in enumerate(self._sheets.values()):
             relationships.append(
-                f'<Relationship Id="rId{i + 1}" '
+                f'<Relationship Id="rId{i + 2}" '
                 f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
-                f'Target="worksheets/{sheet.title}.xml"/>'
+                f'Target="worksheets/sheet{i + 1}.xml"/>'
             )
 
         return "".join(relationships)
@@ -434,16 +444,20 @@ cdef class Workbook:
         Оптимизированное создание ZIP файла в памяти
         """
         cdef object buffer = BytesIO()
+        cdef int i
         cdef object sheet
 
         with ZipFile(buffer, 'w') as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
+            zip_file.writestr("xl/_rels/workbook.xml.rels",
+                              RELATIONSHIPS_XML_TEMPLATE.format(relationships=self._generate_relationships()))
+            zip_file.writestr("_rels/.rels", MAIN_RELATIONSHIPS_XML_TEMPLATE)
             # styles.xml с number formats
             zip_file.writestr("xl/styles.xml", self._get_styles_xml())
 
-            for sheet in self._sheets.values():
-                zip_file.writestr(f"xl/worksheets/{sheet.title}.xml", sheet.get_xml_data())
+            for i, sheet in enumerate(self._sheets.values()):
+                zip_file.writestr(f"xl/worksheets/sheet{i + 1}.xml", sheet.get_xml_data())
 
         buffer.seek(0)
         return buffer.getvalue()
@@ -483,8 +497,8 @@ cdef class Workbook:
             # styles.xml с number formats
             zip_file.writestr("xl/styles.xml", self._get_styles_xml())
 
-            for sheet in self._sheets.values():
-                zip_file.writestr(f"xl/worksheets/{sheet.title}.xml", sheet.get_xml_data())
+            for i, sheet in enumerate(self._sheets.values()):
+                zip_file.writestr(f"xl/worksheets/sheet{i + 1}.xml", sheet.get_xml_data())
 
     @property
     def sheets(self):
