@@ -448,18 +448,32 @@ cdef class Workbook:
         buffer.seek(0)
         return buffer.getvalue()
 
-    def save(self, str file_path):
+    def save(self, file_path):
         """
-        Оптимизированное сохранение в файл
+        Оптимизированное сохранение в файл или file-like объект (BytesIO)
         """
+        cdef bint is_file_like
+        cdef bytes data
+        cdef str dir_path
+        cdef object sheet
+        
+        # Поддержка file-like объектов (BytesIO, StringIO и т.д.)
+        is_file_like = hasattr(file_path, 'write')
+        
+        if is_file_like:
+            # Сохраняем в BytesIO или другой file-like объект
+            data = self.save_virtual_workbook()
+            file_path.write(data)
+            return
+        
+        # Обычное сохранение в файл
         if not file_path:
             raise ValueError("File path cannot be empty")
 
-        cdef str dir_path = os.path.dirname(file_path)
+        dir_path = os.path.dirname(file_path)
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
-        cdef object sheet
         with ZipFile(file_path, 'w') as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
