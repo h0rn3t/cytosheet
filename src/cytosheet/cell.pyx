@@ -7,6 +7,7 @@ cdef class Cell:
     cdef public str merged_range
     cdef public str data_type  # 'n', 's', 'b', 'f', 'd', 'e'
     cdef public int _style_id  # внутренний индекс XF для styles.xml
+    cdef public int _shared_string_index  # индекс в sharedStrings для оригинальных ячеек
 
     def __init__(self, str position=None, object value=None, object style=None, object parent=None):
         self.position = position if position is not None else ""
@@ -16,6 +17,7 @@ cdef class Cell:
         self.merged_range = None
         self.data_type = None
         self._style_id = -1
+        self._shared_string_index = -1  # -1 означает что это не ссылка на sharedString
         # Всегда инициализируем стиль по умолчанию, если не передан явно
         if style is None:
             from .styles import DEFAULT_STYLE

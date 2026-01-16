@@ -64,6 +64,11 @@ cdef class Workbook:
     cdef dict _num_format_map      # map numberFormat string -> numFmtId
     cdef dict _style_xf_map        # map Style id() -> xfId
     cdef dict _xf_numfmt_map       # map xfId -> numberFormat (при чтении)
+    cdef bytes _original_styles_xml  # оригинальный styles.xml из загруженного файла
+    cdef bytes _original_shared_strings_xml  # оригинальный sharedStrings.xml
+    cdef bytes _original_content_types_xml  # оригинальный [Content_Types].xml
+    cdef bytes _original_workbook_xml  # оригинальный xl/workbook.xml
+    cdef bytes _original_workbook_rels_xml  # оригинальный xl/_rels/workbook.xml.rels
 
     def __init__(self, str sheet_name=None, object _archive=None, bint lazy=False):
         """
@@ -78,6 +83,11 @@ cdef class Workbook:
         self._num_format_map = {}
         self._style_xf_map = {}
         self._xf_numfmt_map = {}
+        self._original_styles_xml = None
+        self._original_shared_strings_xml = None
+        self._original_content_types_xml = None
+        self._original_workbook_xml = None
+        self._original_workbook_rels_xml = None
 
         # ВАЖНО: если архив передан, навешиваем на него ссылку на Workbook,
         # чтобы Worksheet через self._archive._workbook_ref мог получить доступ
@@ -106,14 +116,28 @@ cdef class Workbook:
             except Exception:
                 pass
 
+        # Сохраняем оригинальный [Content_Types].xml
+        if "[Content_Types].xml" in self._archive.namelist():
+            self._original_content_types_xml = self._archive.read("[Content_Types].xml")
+        
+        # Сохраняем оригинальный xl/workbook.xml
+        if "xl/workbook.xml" in self._archive.namelist():
+            self._original_workbook_xml = self._archive.read("xl/workbook.xml")
+        
+        # Сохраняем оригинальный xl/_rels/workbook.xml.rels
+        if "xl/_rels/workbook.xml.rels" in self._archive.namelist():
+            self._original_workbook_rels_xml = self._archive.read("xl/_rels/workbook.xml.rels")
+
         # Загружаем shared strings если есть
         if "xl/sharedStrings.xml" in self._archive.namelist():
             xml = self._archive.read("xl/sharedStrings.xml")
+            self._original_shared_strings_xml = xml  # сохраняем оригинал
             self._parse_shared_strings(xml)
 
         # Загружаем стили, если есть
         if "xl/styles.xml" in self._archive.namelist():
             xml = self._archive.read("xl/styles.xml")
+            self._original_styles_xml = xml  # сохраняем оригинал
             self._parse_styles(xml)
 
         # --- Новое: читаем реальные имена листов из workbook.xml, если он есть ---
@@ -191,16 +215,22 @@ cdef class Workbook:
         Оптимизированный парсинг shared strings
         """
         cdef object root = etree.fromstring(xml_data)
-        cdef list strings = root.xpath('//si')
+        cdef list strings
         cdef object s
-        cdef str text
+        cdef object text_result
+        
+        # Пробуем с namespace
+        strings = root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si')
+        if not strings:
+            # Fallback без namespace
+            strings = root.findall('.//si')
 
         # Предварительно выделяем память для списка
         self._shared_strings = [None] * len(strings)
 
         for i, s in enumerate(strings):
-            text = s.xpath('string(.)')
-            self._shared_strings[i] = text[0] if text else ""
+            text_result = s.xpath('string(.)')
+            self._shared_strings[i] = str(text_result) if text_result else ""
 
     cdef void _parse_styles(self, bytes xml_data):
         """Простейший парсинг styles.xml для number_format.
@@ -402,25 +432,33 @@ cdef class Workbook:
 
     cdef bytes _get_workbook_xml(self):
         """
-        Генерация XML содержимого для workbook.xml
+        Генерация XML содержимого для workbook.xml.
+        Если файл был загружен - используем оригинальный.
         """
+        if self._original_workbook_xml is not None:
+            return self._original_workbook_xml
         return WORKBOOK_XML_TEMPLATE.format(sheets=self._generate_sheet_elements()).encode('utf-8')
 
     cdef bytes _get_content_types_xml(self):
         """
-        Генерация XML содержимого для [Content_Types].xml
+        Генерация XML содержимого для [Content_Types].xml.
+        Если файл был загружен - используем оригинальный.
         """
+        if self._original_content_types_xml is not None:
+            return self._original_content_types_xml
         return CONTENT_TYPES_XML_TEMPLATE.format(sheet_overrides=self._generate_sheet_overrides()).encode('utf-8')
 
     cdef bytes _get_styles_xml(self):
-        """Генерация minimal styles.xml, совместимого с openpyxl.
-
-        - Если нет пользовательских number_format, numFmts пустой.
-        - Всегда есть хотя бы один xf в cellXfs.
-        - Всегда есть cellStyleXfs и cellStyles с style "Normal" (xfId=0),
-          чтобы openpyxl не выдавал предупреждение
-          "Workbook contains no default style, apply openpyxl's default".
+        """Генерация styles.xml.
+        
+        Если файл был загружен и есть оригинальный styles.xml - используем его.
+        Иначе генерируем minimal styles.xml, совместимый с openpyxl.
         """
+        # Если есть оригинальный styles.xml - возвращаем его
+        if self._original_styles_xml is not None:
+            return self._original_styles_xml
+            
+        # Иначе генерируем новый
         cdef str numFmts_xml, cellXfs_xml
         cdef int numFmts_count, cellXfs_count
 
@@ -450,11 +488,21 @@ cdef class Workbook:
         with ZipFile(buffer, 'w') as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
-            zip_file.writestr("xl/_rels/workbook.xml.rels",
-                              RELATIONSHIPS_XML_TEMPLATE.format(relationships=self._generate_relationships()))
+            
+            # Используем оригинальный rels если есть
+            if self._original_workbook_rels_xml is not None:
+                zip_file.writestr("xl/_rels/workbook.xml.rels", self._original_workbook_rels_xml)
+            else:
+                zip_file.writestr("xl/_rels/workbook.xml.rels",
+                                  RELATIONSHIPS_XML_TEMPLATE.format(relationships=self._generate_relationships()))
+            
             zip_file.writestr("_rels/.rels", MAIN_RELATIONSHIPS_XML_TEMPLATE)
             # styles.xml с number formats
             zip_file.writestr("xl/styles.xml", self._get_styles_xml())
+            
+            # Сохраняем sharedStrings.xml если был в оригинале
+            if self._original_shared_strings_xml is not None:
+                zip_file.writestr("xl/sharedStrings.xml", self._original_shared_strings_xml)
 
             for i, sheet in enumerate(self._sheets.values()):
                 zip_file.writestr(f"xl/worksheets/sheet{i + 1}.xml", sheet.get_xml_data())
@@ -464,7 +512,9 @@ cdef class Workbook:
 
     def save(self, file_path):
         """
-        Оптимизированное сохранение в файл или file-like объект (BytesIO)
+        Оптимизированное сохранение в файл или file-like объект (BytesIO).
+        Если файл был загружен из архива - копируем все оригинальные файлы
+        и перезаписываем только измененные листы.
         """
         cdef bint is_file_like
         cdef bytes data
@@ -489,13 +539,37 @@ cdef class Workbook:
             os.makedirs(dir_path, exist_ok=True)
 
         with ZipFile(file_path, 'w') as zip_file:
+            # Если файл был загружен из архива - копируем все оригинальные файлы
+            if self._archive is not None:
+                for item in self._archive.namelist():
+                    # Пропускаем файлы, которые будем перезаписывать
+                    if item in ['xl/workbook.xml', '[Content_Types].xml', 
+                                'xl/_rels/workbook.xml.rels', '_rels/.rels',
+                                'xl/styles.xml', 'xl/sharedStrings.xml']:
+                        continue
+                    # Пропускаем листы - их перезапишем
+                    if item.startswith('xl/worksheets/') and item.endswith('.xml'):
+                        continue
+                    # Копируем остальные файлы как есть
+                    zip_file.writestr(item, self._archive.read(item))
+            
+            # Записываем обновленные файлы
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
-            zip_file.writestr("xl/_rels/workbook.xml.rels",
-                              RELATIONSHIPS_XML_TEMPLATE.format(relationships=self._generate_relationships()))
+            
+            # Используем оригинальный rels если есть
+            if self._original_workbook_rels_xml is not None:
+                zip_file.writestr("xl/_rels/workbook.xml.rels", self._original_workbook_rels_xml)
+            else:
+                zip_file.writestr("xl/_rels/workbook.xml.rels",
+                                  RELATIONSHIPS_XML_TEMPLATE.format(relationships=self._generate_relationships()))
+            
             zip_file.writestr("_rels/.rels", MAIN_RELATIONSHIPS_XML_TEMPLATE)
-            # styles.xml с number formats
             zip_file.writestr("xl/styles.xml", self._get_styles_xml())
+            
+            # Сохраняем sharedStrings.xml если был в оригинале
+            if self._original_shared_strings_xml is not None:
+                zip_file.writestr("xl/sharedStrings.xml", self._original_shared_strings_xml)
 
             for i, sheet in enumerate(self._sheets.values()):
                 zip_file.writestr(f"xl/worksheets/sheet{i + 1}.xml", sheet.get_xml_data())

@@ -43,6 +43,8 @@ cdef class Worksheet:
     cdef public dict _column_dimensions  # str -> ColumnDimension (внутреннее хранилище)
     cdef object _row_dim_container
     cdef object _col_dim_container
+    cdef bytes _original_xml  # оригинальный XML листа
+    cdef public bint _modified  # флаг изменения листа
 
     def __init__(
             self,
@@ -68,6 +70,15 @@ cdef class Worksheet:
         self._column_dimensions = {}
         self._row_dim_container = RowDimensionContainer(self)
         self._col_dim_container = ColumnDimensionContainer(self)
+        self._original_xml = None
+        self._modified = False
+        
+        # Если загружаем из архива - сохраняем оригинальный XML
+        if self._archive is not None and self._sheet_path is not None:
+            try:
+                self._original_xml = self._archive.read(self._sheet_path)
+            except Exception:
+                pass
 
         if archive is not None and _preload and _sheet_path is not None:
             xml = archive.read(_sheet_path)
@@ -282,7 +293,8 @@ cdef class Worksheet:
         cdef int row_tag_start, row_tag_end, row_idx
         cdef str row_tag
         cdef double ht
-        cdef bint row_hidden
+        cdef bint row_hidden, is_self_closing
+        cdef int closing_tag_end
 
         # парсим <row> атрибуты
         pos = 0
@@ -338,7 +350,20 @@ cdef class Worksheet:
             cell_start = xml_str.find('<c r="', start_pos)
             if cell_start == -1:
                 break
-            cell_end = xml_str.find('</c>', cell_start)
+            
+            # Проверяем самозакрывающийся тег или обычный
+            cell_end = xml_str.find('/>', cell_start)
+            closing_tag_end = xml_str.find('</c>', cell_start)
+            
+            # Выбираем ближайший конец
+            if cell_end != -1 and (closing_tag_end == -1 or cell_end < closing_tag_end):
+                # Самозакрывающийся тег <c ... />
+                is_self_closing = True
+            else:
+                # Обычный тег <c ...>...</c>
+                cell_end = closing_tag_end
+                is_self_closing = False
+                
             if cell_end == -1:
                 break
 
@@ -353,6 +378,32 @@ cdef class Worksheet:
                 start_pos = cell_end + 4
                 continue
             cell_ref = xml_str[r_start:r_end]
+            
+            # Если это самозакрывающийся тег - создаем пустую ячейку со стилем
+            if is_self_closing:
+                cell = Cell(position=cell_ref, value=None, parent=self)
+                # Парсим стиль
+                s_start = xml_str.find('s="', cell_start, cell_end)
+                if s_start != -1:
+                    s_start += 3
+                    s_end = xml_str.find('"', s_start, cell_end)
+                    if s_end != -1:
+                        s_attr = xml_str[s_start:s_end]
+                        try:
+                            style_idx = int(s_attr)
+                            cell._style_id = style_idx
+                            if self._xf_numfmt_map is not None and self._xf_numfmt_map:
+                                fmt_code = self._xf_numfmt_map.get(style_idx)
+                                if fmt_code is not None:
+                                    from .styles import Style
+                                    style = Style()
+                                    style.numberFormat = fmt_code
+                                    cell.style = style
+                        except ValueError:
+                            pass
+                self._cells[cell_ref] = cell
+                start_pos = cell_end + 2  # +2 для />
+                continue
 
             # t="s" / t="str" / t="n" / t="inlineStr" / ...
             cell_type = None
@@ -446,35 +497,69 @@ cdef class Worksheet:
                     shared_index = int(raw_value)
                     if 0 <= shared_index < len(self._shared_strings):
                         value = self._shared_strings[shared_index]
+                        # Сохраняем индекс для последующей генерации XML
+                        cell = Cell(position=cell_ref, value=value, parent=self)
+                        cell._shared_string_index = shared_index
+                        cell.data_type = 's'
                     else:
                         value = raw_value
+                        cell = Cell(position=cell_ref, value=value, parent=self)
                 except (ValueError, TypeError):
                     value = raw_value
+                    cell = Cell(position=cell_ref, value=value, parent=self)
             else:
                 value = self._convert_cell_value_fast(raw_value)
-
-            if value is not None:
                 cell = Cell(position=cell_ref, value=value, parent=self)
-                if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                    s_start = xml_str.find('s="', cell_start, cell_end)
-                    if s_start != -1:
-                        s_start += 3
-                        s_end = xml_str.find('"', s_start, cell_end)
-                        if s_end != -1:
-                            s_attr = xml_str[s_start:s_end]
-                            try:
-                                style_idx = int(s_attr)
-                                fmt_code = self._xf_numfmt_map.get(style_idx)
-                                if fmt_code is not None:
-                                    from .styles import Style
-                                    style = Style()
-                                    style.numberFormat = fmt_code
-                                    cell.style = style
-                            except ValueError:
-                                pass
+                if cell_type:
+                    cell.data_type = cell_type
+
+            # Сохраняем ячейку если есть значение ИЛИ стиль
+            has_style = False
+            s_start = xml_str.find('s="', cell_start, cell_end)
+            if s_start != -1:
+                s_start += 3
+                s_end = xml_str.find('"', s_start, cell_end)
+                if s_end != -1:
+                    s_attr = xml_str[s_start:s_end]
+                    try:
+                        style_idx = int(s_attr)
+                        cell._style_id = style_idx  # Сохраняем для генерации XML
+                        has_style = True
+                        if self._xf_numfmt_map is not None and self._xf_numfmt_map:
+                            fmt_code = self._xf_numfmt_map.get(style_idx)
+                            if fmt_code is not None:
+                                from .styles import Style
+                                style = Style()
+                                style.numberFormat = fmt_code
+                                cell.style = style
+                    except ValueError:
+                        pass
+            
+            if value is not None or has_style:
                 self._cells[cell_ref] = cell
 
             start_pos = cell_end + 4
+        
+        # Парсим mergeCells
+        merge_start = xml_str.find('<mergeCells')
+        if merge_start != -1:
+            merge_end = xml_str.find('</mergeCells>', merge_start)
+            if merge_end != -1:
+                merge_section = xml_str[merge_start:merge_end + 13]
+                # Ищем все mergeCell ref="..."
+                pos = 0
+                while True:
+                    ref_start = merge_section.find('ref="', pos)
+                    if ref_start == -1:
+                        break
+                    ref_start += 5
+                    ref_end = merge_section.find('"', ref_start)
+                    if ref_end == -1:
+                        break
+                    merge_ref = merge_section[ref_start:ref_end]
+                    if merge_ref not in self._merged_cells:
+                        self._merged_cells.append(merge_ref)
+                    pos = ref_end + 1
 
     cdef void _parse_row_col_dimensions_iterparse(self, bytes xml_data, bint recover=False):
         """Парсинг <col>/<row> для iterparse-парсеров (DM-005, DM-006)."""
@@ -697,30 +782,38 @@ cdef class Worksheet:
                             shared_string_index = int(raw)
                             if 0 <= shared_string_index < len(self._shared_strings):
                                 value = self._shared_strings[shared_string_index]
+                                # Создаем ячейку и сохраняем индекс
+                                cell = Cell(position=col_ref, value=value, parent=self)
+                                cell._shared_string_index = shared_string_index
+                                cell.data_type = 's'
                             else:
                                 value = raw
+                                cell = Cell(position=col_ref, value=value, parent=self)
                         except (ValueError, TypeError):
                             value = raw
+                            cell = Cell(position=col_ref, value=value, parent=self)
                     else:
                         value = self._convert_cell_value_fast(raw)
+                        if value is None:
+                            cell_elem.clear()
+                            continue
+                        cell = Cell(position=col_ref, value=value, parent=self)
+                        if cell_type:
+                            cell.data_type = cell_type
 
-                    if value is None:
-                        cell_elem.clear()
-                        continue
-
-                    cell = Cell(position=col_ref, value=value, parent=self)
-
-                # Применяем number_format при наличии стиля
+                # Применяем number_format и сохраняем style_id
                 s_attr = cell_elem.get('s')
-                if s_attr is not None and self._xf_numfmt_map is not None and self._xf_numfmt_map:
+                if s_attr is not None:
                     try:
                         style_idx = int(s_attr)
-                        fmt_code = self._xf_numfmt_map.get(style_idx)
-                        if fmt_code is not None:
-                            from .styles import Style
-                            style = Style()
-                            style.numberFormat = fmt_code
-                            cell.style = style
+                        cell._style_id = style_idx  # Сохраняем для генерации XML
+                        if self._xf_numfmt_map is not None and self._xf_numfmt_map:
+                            fmt_code = self._xf_numfmt_map.get(style_idx)
+                            if fmt_code is not None:
+                                from .styles import Style
+                                style = Style()
+                                style.numberFormat = fmt_code
+                                cell.style = style
                     except ValueError:
                         pass
 
@@ -871,30 +964,37 @@ cdef class Worksheet:
                             shared_string_index = int(raw)
                             if 0 <= shared_string_index < len(self._shared_strings):
                                 value = self._shared_strings[shared_string_index]
+                                cell = Cell(position=col_ref, value=value, parent=self)
+                                cell._shared_string_index = shared_string_index
+                                cell.data_type = 's'
                             else:
                                 value = raw
+                                cell = Cell(position=col_ref, value=value, parent=self)
                         except (ValueError, TypeError):
                             value = raw
+                            cell = Cell(position=col_ref, value=value, parent=self)
                     else:
                         value = self._convert_cell_value_fast(raw)
+                        if value is None:
+                            cell_elem.clear()
+                            continue
+                        cell = Cell(position=col_ref, value=value, parent=self)
+                        if cell_type:
+                            cell.data_type = cell_type
 
-                    if value is None:
-                        cell_elem.clear()
-                        continue
-
-                    cell = Cell(position=col_ref, value=value, parent=self)
-
-                # Применяем number_format при наличии стиля (как в стандартном парсере)
+                # Применяем number_format и сохраняем style_id
                 s_attr = cell_elem.get('s')
-                if s_attr is not None and self._xf_numfmt_map is not None and self._xf_numfmt_map:
+                if s_attr is not None:
                     try:
                         style_idx = int(s_attr)
-                        fmt_code = self._xf_numfmt_map.get(style_idx)
-                        if fmt_code is not None:
-                            from .styles import Style
-                            style = Style()
-                            style.numberFormat = fmt_code
-                            cell.style = style
+                        cell._style_id = style_idx
+                        if self._xf_numfmt_map is not None and self._xf_numfmt_map:
+                            fmt_code = self._xf_numfmt_map.get(style_idx)
+                            if fmt_code is not None:
+                                from .styles import Style
+                                style = Style()
+                                style.numberFormat = fmt_code
+                                cell.style = style
                     except ValueError:
                         pass
 
@@ -999,6 +1099,8 @@ cdef class Worksheet:
                 cell.value = value
                 if isinstance(value, str) and value.startswith('='):
                     cell.data_type = 'f'
+            # Помечаем лист как измененный
+            self._modified = True
 
         # Оновлюємо границі
         if row > self._max_row:
@@ -1327,7 +1429,14 @@ cdef class Worksheet:
     # ------------------------------------------------------------------
 
     cpdef bytes get_xml_data(self):
-        """Генерация XML содержимого листа + <row>/<col> для dimensions."""
+        """Генерация XML содержимого листа + <row>/<col> для dimensions.
+        
+        Если лист не был изменен и есть оригинальный XML - возвращаем его.
+        """
+        # Если лист не изменялся и есть оригинальный XML - возвращаем его
+        if not self._modified and self._original_xml is not None:
+            return self._original_xml
+            
         cdef dict rows_data = {}
         cdef str cell_position, column
         cdef int row, i
@@ -1338,8 +1447,24 @@ cdef class Worksheet:
         cdef list cols_xml
         cdef str col_letter
 
-        # собираем данные ячеек (существующий код перенесён сюда без изменений)
-        for cell_position, cell in self._cells.items():
+        # Создаем список (row, col_num, cell_position) для правильной сортировки
+        cdef list cell_sort_list = []
+        cdef int col_num
+        for cell_position in self._cells.keys():
+            i = 0
+            while i < len(cell_position) and cell_position[i].isalpha():
+                i += 1
+            column = cell_position[:i]
+            row = int(cell_position[i:])
+            col_num = self._col_to_num(column)
+            cell_sort_list.append((row, col_num, cell_position))
+        
+        # Сортируем по строке, затем по номеру колонки
+        cell_sort_list.sort()
+
+        # собираем данные ячеек
+        for row, col_num, cell_position in cell_sort_list:
+            cell = self._cells[cell_position]
             if cell.value is not None or getattr(cell, 'is_merged_cell', False):
                 i = 0
                 while i < len(cell_position) and cell_position[i].isalpha():
@@ -1360,6 +1485,15 @@ cdef class Worksheet:
                 if hasattr(cell, '_style_id') and getattr(cell, '_style_id') is not None and getattr(cell, '_style_id') >= 0:
                     style_attr = f' s="{cell._style_id}"'
 
+                # Если ячейка была загружена из файла и имеет ссылку на sharedString - используем её
+                try:
+                    if cell._shared_string_index >= 0:
+                        tag = f'<c r="{cell_position}" s="{cell._style_id if cell._style_id >= 0 else 0}" t="s"><v>{cell._shared_string_index}</v></c>'
+                        rows_data[row].append(tag)
+                        continue
+                except (AttributeError, TypeError):
+                    pass
+                
                 # Булевые значения должны сериализоваться как t="b" c 1/0,
                 # иначе openpyxl пытается парсить "True"/"False" как число и падает.
                 if isinstance(cell_value, bool):
