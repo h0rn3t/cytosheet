@@ -1440,7 +1440,9 @@ cdef class Worksheet:
         # собираем данные ячеек
         for row, col_num, cell_position in cell_sort_list:
             cell = self._cells[cell_position]
-            if cell.value is not None or getattr(cell, 'is_merged_cell', False):
+            # Серіалізуємо комірку зі значенням, merge-частиною АБО власним стилем
+            # (порожня стильована комірка має зберегтись як <c r=".." s="N"/>, як в openpyxl).
+            if cell.value is not None or getattr(cell, 'is_merged_cell', False) or cell._style_id >= 0:
                 i = 0
                 while i < len(cell_position) and cell_position[i].isalpha():
                     i += 1
@@ -1482,7 +1484,8 @@ cdef class Worksheet:
                         escaped_value = str(cell_value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                         tag = f'<c r="{cell_position}" t="str"{style_attr}><v>{escaped_value}</v></c>'
                     else:
-                        tag = f'<c r="{cell_position}"{style_attr}></c>'
+                        # Порожня комірка лише зі стилем — self-closing, як в openpyxl
+                        tag = f'<c r="{cell_position}"{style_attr}/>'
 
                 rows_data[row].append(tag)
 

@@ -1,5 +1,6 @@
 import os
-from zipfile import ZipFile
+import re
+from zipfile import ZipFile, ZIP_DEFLATED
 from lxml import etree
 from io import BytesIO
 from .worksheet import Worksheet
@@ -551,12 +552,13 @@ cdef class Workbook:
 
         Для загруженной книги возвращаем оригинальный styles.xml (COMPAT-2: не
         теряем компоненты, которые мы не моделируем — themes, dxfs, indexed colors
-        и т.д.). Для новой книги строим полный дедуплицированный styles.xml
+        и т.д.), дописывая в конец таблиц лишь НОВЫЕ стили добавленных ячеек
+        (merge). Для новой книги строим полный дедуплицированный styles.xml
         (fonts/fills/borders/numFmts + cellXfs со ссылками), чтобы визуальные стили
         (D-2) сохранялись и читались openpyxl.
         """
         if self._original_styles_xml is not None:
-            return self._original_styles_xml
+            return self._merge_loaded_styles_xml()
 
         cdef str numFmts_xml, fonts_xml, fills_xml, borders_xml, cellXfs_xml, numFmts_section
         cdef int numFmts_count, fonts_count, fills_count, borders_count, cellXfs_count
@@ -584,7 +586,7 @@ cdef class Workbook:
         cdef int i
         cdef object sheet
 
-        with ZipFile(buffer, 'w') as zip_file:
+        with ZipFile(buffer, 'w', compression=ZIP_DEFLATED) as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
             
@@ -637,7 +639,7 @@ cdef class Workbook:
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
-        with ZipFile(file_path, 'w') as zip_file:
+        with ZipFile(file_path, 'w', compression=ZIP_DEFLATED) as zip_file:
             # Если файл был загружен из архива - копируем все оригинальные файлы
             if self._archive is not None:
                 for item in self._archive.namelist():
@@ -812,6 +814,207 @@ cdef class Workbook:
             len(numfmt_elems), len(font_elems), len(fill_elems),
             len(border_elems), len(xf_elems),
         )
+
+    # ------------------------------------------------------------------
+    # Merge нових стилів у styles.xml завантаженої книги
+    # ------------------------------------------------------------------
+    # Оригінальний styles.xml зберігається байт-у-байт (COMPAT-2), а стилі
+    # доданих/нових комірок (cell._style_id == -1 з не-дефолтним Style)
+    # дописуються в кінець відповідних таблиць. Якщо нових стилів немає —
+    # повертається оригінал без змін (тож round-trip незмінених книг лишається
+    # ідентичним).
+
+    cdef int _section_count(self, str data, str tag):
+        """Кількість елементів секції styles.xml за атрибутом count (з fallback)."""
+        cdef object m = re.search(r'<' + tag + r'\b[^>]*\bcount="(\d+)"', data)
+        if m is not None:
+            return int(m.group(1))
+        # fallback: рахуємо одиничні елементи
+        cdef dict singular = {'fonts': 'font', 'fills': 'fill', 'borders': 'border', 'cellXfs': 'xf'}
+        cdef str child = singular.get(tag)
+        if child is None:
+            return 0
+        return len(re.findall(r'<' + child + r'[ >/]', data))
+
+    cdef int _max_numfmt_id(self, str data):
+        """Найбільший numFmtId в оригіналі (для безконфліктної нумерації нових)."""
+        cdef int mx = 163
+        cdef object m
+        cdef int v
+        for m in re.finditer(r'<numFmt\b[^>]*\bnumFmtId="(\d+)"', data):
+            v = int(m.group(1))
+            if v > mx:
+                mx = v
+        return mx
+
+    cdef str _insert_before_close(self, str data, str tag, str new_inner, int new_count):
+        """Вставляє new_inner перед </tag> і оновлює count секції."""
+        data = re.sub(
+            r'(<' + tag + r'\b[^>]*\bcount=")\d+(")',
+            lambda m: m.group(1) + str(new_count) + m.group(2),
+            data, count=1,
+        )
+        cdef str close = '</' + tag + '>'
+        cdef int idx = data.find(close)
+        if idx != -1:
+            return data[:idx] + new_inner + data[idx:]
+        return data
+
+    cdef str _insert_numfmts(self, str data, str new_inner, int added):
+        """Дописує нові numFmt (створює секцію <numFmts>, якщо її немає)."""
+        cdef object m
+        cdef int old, idx
+        if '</numFmts>' in data:
+            m = re.search(r'<numFmts\b[^>]*\bcount="(\d+)"', data)
+            old = int(m.group(1)) if m is not None else 0
+            data = re.sub(
+                r'(<numFmts\b[^>]*\bcount=")\d+(")',
+                lambda mm: mm.group(1) + str(old + added) + mm.group(2),
+                data, count=1,
+            )
+            idx = data.find('</numFmts>')
+            return data[:idx] + new_inner + data[idx:]
+        # секції немає — створюємо перед <fonts
+        idx = data.find('<fonts')
+        if idx != -1:
+            return data[:idx] + f'<numFmts count="{added}">{new_inner}</numFmts>' + data[idx:]
+        return data
+
+    cdef tuple _collect_new_styles(self, int off_fonts, int off_fills,
+                                   int off_borders, int off_xfs, int start_numfmt):
+        """Збирає стилі нових/змінених комірок (style_id == -1) з offset-нумерацією.
+
+        «Дефолтними» вважаються і голий openpyxl-дефолт, і стиль xf0 книги — щоб
+        завантажені комірки без s=, що успадкували xf0, НЕ дублювали його (інакше
+        round-trip незмінених книг переставав би бути ідентичним). Комірка, чий
+        стиль резолвиться в дефолтний xf, серіалізується без s= (успадкує xf0).
+        Решта отримують нові компоненти, дописані після оригінальних.
+        """
+        cdef dict nf_font = {}, nf_fill = {}, nf_border = {}, nf_numfmt = {}, nf_xf = {}
+        cdef list e_font = [], e_fill = [], e_border = [], e_numfmt = [], e_xf = []
+        cdef int next_numfmt = start_numfmt
+        cdef object sheet, cell, st
+        cdef str fxml, flxml, bxml, fmt, axml, pxml, xfxml
+        cdef int fontId, fillId, borderId, numFmtId, xfId
+
+        # Множини дефолтних представлень компонентів: голий дефолт + стиль xf0 книги
+        cdef object xf0 = self._xf_style_map.get(0) if self._xf_style_map else None
+        cdef set default_fonts = {'<font><sz val="11"/><name val="Calibri"/></font>'}
+        cdef set default_fills = {'<fill><patternFill patternType="none"/></fill>'}
+        cdef set default_borders = {'<border><left/><right/><top/><bottom/><diagonal/></border>'}
+        cdef object default_numfmt = None
+        if xf0 is not None:
+            if xf0.font is not None:
+                default_fonts.add(xf0.font._to_xml())
+            if xf0.fill is not None:
+                default_fills.add(xf0.fill._to_xml())
+            if xf0.border is not None:
+                default_borders.add(xf0.border._to_xml())
+            default_numfmt = xf0.numberFormat
+
+        for sheet in self._sheets.values():
+            if not getattr(sheet, '_modified', False):
+                continue
+            for cell in getattr(sheet, '_cells', {}).values():
+                if cell._style_id != -1:
+                    continue  # існуюча незмінена комірка зберігає оригінальний xf
+                st = cell.style
+                if st is None:
+                    continue
+
+                fxml = st.font._to_xml() if st.font is not None else '<font><sz val="11"/><name val="Calibri"/></font>'
+                if fxml in default_fonts:
+                    fontId = 0
+                elif fxml in nf_font:
+                    fontId = nf_font[fxml]
+                else:
+                    fontId = off_fonts + len(e_font)
+                    nf_font[fxml] = fontId
+                    e_font.append(fxml)
+
+                flxml = st.fill._to_xml() if st.fill is not None else '<fill><patternFill patternType="none"/></fill>'
+                if flxml in default_fills:
+                    fillId = 0
+                elif flxml in nf_fill:
+                    fillId = nf_fill[flxml]
+                else:
+                    fillId = off_fills + len(e_fill)
+                    nf_fill[flxml] = fillId
+                    e_fill.append(flxml)
+
+                bxml = st.border._to_xml() if st.border is not None else '<border><left/><right/><top/><bottom/><diagonal/></border>'
+                if bxml in default_borders:
+                    borderId = 0
+                elif bxml in nf_border:
+                    borderId = nf_border[bxml]
+                else:
+                    borderId = off_borders + len(e_border)
+                    nf_border[bxml] = borderId
+                    e_border.append(bxml)
+
+                numFmtId = 0
+                fmt = st.numberFormat
+                if fmt and fmt != 'General' and fmt != default_numfmt:
+                    if fmt in nf_numfmt:
+                        numFmtId = nf_numfmt[fmt]
+                    else:
+                        numFmtId = next_numfmt
+                        next_numfmt += 1
+                        nf_numfmt[fmt] = numFmtId
+                        e_numfmt.append(f'<numFmt numFmtId="{numFmtId}" formatCode="{_esc_xml_attr(fmt)}"/>')
+
+                axml = st.alignment._to_xml() if st.alignment is not None else ''
+                pxml = st.protection._to_xml() if st.protection is not None else ''
+
+                # Стиль резолвиться в дефолтний xf0 — не плодимо xf, лишаємо без s=
+                if fontId == 0 and fillId == 0 and borderId == 0 and numFmtId == 0 and not axml and not pxml:
+                    continue
+
+                xfxml = self._build_xf(numFmtId, fontId, fillId, borderId, axml, pxml)
+                if xfxml in nf_xf:
+                    xfId = nf_xf[xfxml]
+                else:
+                    xfId = off_xfs + len(e_xf)
+                    nf_xf[xfxml] = xfId
+                    e_xf.append(xfxml)
+                cell._style_id = xfId
+
+        return (
+            "".join(e_numfmt), "".join(e_font), "".join(e_fill),
+            "".join(e_border), "".join(e_xf),
+            len(e_numfmt), len(e_font), len(e_fill), len(e_border), len(e_xf),
+        )
+
+    cdef bytes _merge_loaded_styles_xml(self):
+        """styles.xml завантаженої книги: оригінал + дописані нові стилі (або оригінал)."""
+        cdef str data = self._original_styles_xml.decode('utf-8')
+        cdef int off_fonts = self._section_count(data, 'fonts')
+        cdef int off_fills = self._section_count(data, 'fills')
+        cdef int off_borders = self._section_count(data, 'borders')
+        cdef int off_xfs = self._section_count(data, 'cellXfs')
+        cdef int start_numfmt = self._max_numfmt_id(data) + 1
+        if start_numfmt < 164:
+            start_numfmt = 164
+
+        cdef tuple res = self._collect_new_styles(off_fonts, off_fills, off_borders, off_xfs, start_numfmt)
+        cdef str nfmt = res[0], fonts = res[1], fills = res[2], borders = res[3], xfs = res[4]
+        cdef int c_nf = res[5], c_f = res[6], c_fl = res[7], c_b = res[8], c_xf = res[9]
+
+        if c_xf == 0:
+            # Нових стилів немає — повертаємо оригінал байт-у-байт (COMPAT-2)
+            return self._original_styles_xml
+
+        if c_f:
+            data = self._insert_before_close(data, 'fonts', fonts, off_fonts + c_f)
+        if c_fl:
+            data = self._insert_before_close(data, 'fills', fills, off_fills + c_fl)
+        if c_b:
+            data = self._insert_before_close(data, 'borders', borders, off_borders + c_b)
+        data = self._insert_before_close(data, 'cellXfs', xfs, off_xfs + c_xf)
+        if c_nf:
+            data = self._insert_numfmts(data, nfmt, c_nf)
+
+        return data.encode('utf-8')
 
     def __getitem__(self, str key):
         """Доступ к листу по имени через синтаксис wb['Sheet1'], совместимый с openpyxl."""

@@ -19,7 +19,8 @@
 
 - [x] 3.1 `styles.pyx`/`workbook.pyx::_parse_styles`: парсити `fonts/fills/borders/cellXfs/alignment/protection` у індексовані таблиці. У `styles.pyx` додано `*_from_element()` фабрики + `_to_xml()`/`copy()` на класах стилів; `_parse_styles` будує `_xf_style_map` (xfId → повний `Style`)
 - [x] 3.2 `worksheet.pyx` парсери: для кожної комірки збирати повний `Style` за її `s=` (xfId). Додано helper-и `_style_for_xf()`/`_apply_style_simple()`; усі три парсери (simple/standard/chunked) застосовують копію `Style` замість лише `numberFormat`
-- [x] 3.3 `workbook.pyx::_collect_styles`/`_get_styles_xml`: дедуплікований реєстр font/fill/border/numFmt (ключ = XML-фрагмент) + `cellXfs` з реальними посиланнями та apply*-прапорцями; зарезервовано fillId 0=none/1=gray125; для завантаженої книги повертається оригінальний `styles.xml` (COMPAT-2)
+- [x] 3.3 `workbook.pyx::_collect_styles`/`_get_styles_xml`: дедуплікований реєстр font/fill/border/numFmt (ключ = XML-фрагмент) + `cellXfs` з реальними посиланнями та apply*-прапорцями; зарезервовано fillId 0=none/1=gray125
+- [x] 3.3a Merge нових стилів у завантажену книгу (`_merge_loaded_styles_xml`/`_collect_new_styles`): оригінальний `styles.xml` зберігається байт-у-байт, нові/змінені стилі дописуються в кінець таблиць; зміна стилю комірки скидає `_style_id` (cell.pyx `_mark_modified`), стиль xf0 трактується як дефолт, щоб успадковані комірки не плодили дублі
 - [x] 3.4 Тест `test_atko_cell_styles_read_matches_openpyxl` (font.name/bold/sz, fill.fgColor.rgb, alignment звірені з openpyxl на fixture для A1/H1/A2) — закриває D-1
 - [x] 3.5 Тест `test_styles_xml_roundtrip_values` (нова книга: bold/Arial/fill/alignment → openpyxl читає ті самі значення) — закриває D-2
 - [x] 3.6 Знято `xfail` з кроку 1.2 (тест тепер проходить як звичайний позитивний)

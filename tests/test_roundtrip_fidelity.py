@@ -110,6 +110,71 @@ def test_atko_modify_persists_and_keeps_other_styles(tmp_path):
     assert wb2.active['A2'].value == 999
 
 
+def test_atko_add_styled_rows_merges_into_loaded_styles(tmp_path):
+    """ETL поверх існуючого файлу: дописати стильовані рядки, старі стилі цілі.
+
+    Відкрити atko → дописати рядок 6 (A6:C6) з червоною заливкою (C6 вже існує
+    в оригіналі зі своїм s=, тож перевіряється і зміна стилю існуючої комірки) →
+    зберегти. Нові стилі мають влитися у styles.xml, а старі — лишитися.
+    """
+    wb = load_workbook(FIXTURE)
+    ws = wb.active
+    red = PatternFill(patternType='solid', fgColor=Color(rgb='FFFF0000'))
+    for col in (1, 2, 3):  # A6, B6, C6 (C6 існує в оригіналі)
+        c = ws.cell(row=6, column=col, value=f'red-{col}')
+        c.fill = red
+
+    out = tmp_path / 'atko_added_rows.xlsx'
+    wb.save(str(out))
+
+    o = oxl_load(str(out)).active
+    # Нові комірки — червоні
+    for ref in ('A6', 'B6', 'C6'):
+        assert o[ref].fill.patternType == 'solid', ref
+        assert o[ref].fill.fgColor.rgb == 'FFFF0000', ref
+    # Старі стилі нечіпаних комірок збережені
+    assert o['H1'].font.bold is True
+    assert o['H1'].fill.fgColor.rgb == 'FFBDD7EE'
+    assert o['A1'].font.bold is True
+
+    # cytosheet теж читає новий стиль назад
+    c2 = load_workbook(str(out)).active
+    assert c2['A6'].fill.fgColor.rgb == 'FFFF0000'
+    assert c2['A6'].value == 'red-1'
+
+
+def test_atko_change_existing_cell_style_merges(tmp_path):
+    """Зміна стилю існуючої комірки зі значенням (H1) зливається, не ламаючи інші."""
+    wb = load_workbook(FIXTURE)
+    ws = wb.active
+    ws['H1'].font = Font(name='Arial', bold=False, color=Color(rgb='FF00AA00'))
+
+    out = tmp_path / 'atko_changed_h1.xlsx'
+    wb.save(str(out))
+
+    o = oxl_load(str(out)).active
+    # H1: новий шрифт застосовано, значення збережено
+    assert o['H1'].font.name == 'Arial'
+    assert o['H1'].font.bold is False
+    assert o['H1'].font.color.rgb == 'FF00AA00'
+    assert o['H1'].value == 'Місцезнаходження ТКО'
+    # H1 зберегла свою оригінальну заливку (повний Style при read → merge не губить її)
+    assert o['H1'].fill.fgColor.rgb == 'FFBDD7EE'
+    # Інша стильована комірка незмінна
+    assert o['A1'].font.bold is True
+
+
+def test_atko_empty_styled_cell_roundtrips(tmp_path):
+    """Порожня комірка лише зі стилем зберігається й читається (self-closing <c s=..>)."""
+    wb = load_workbook(FIXTURE)
+    wb.active['A6'].fill = PatternFill(patternType='solid', fgColor=Color(rgb='FFFF0000'))
+    out = tmp_path / 'atko_empty_styled.xlsx'
+    wb.save(str(out))
+
+    assert oxl_load(str(out)).active['A6'].fill.fgColor.rgb == 'FFFF0000'
+    assert load_workbook(str(out)).active['A6'].fill.fgColor.rgb == 'FFFF0000'
+
+
 def test_cell_without_explicit_style_inherits_default():
     """Комірка без s= успадковує дефолтний стиль книги (xf=0), як openpyxl (D-1).
 

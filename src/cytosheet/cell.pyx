@@ -18,11 +18,11 @@ cdef class Cell:
         self.data_type = None
         self._style_id = -1
         self._shared_string_index = -1  # -1 означает что это не ссылка на sharedString
-        # Всегда инициализируем стиль по умолчанию, если не передан явно
+        # Кожна комірка отримує ВЛАСНИЙ Style, щоб стилі не "протікали" між
+        # комірками й книгами (раніше спільний DEFAULT_STYLE мутувався глобально).
         if style is None:
-            from .styles import DEFAULT_STYLE
-            # копируем дефолтный стиль, чтобы ячейки не разделали один и тот же объект
-            self.style = DEFAULT_STYLE
+            from .styles import Style
+            self.style = Style()
         else:
             self.style = style
 
@@ -41,6 +41,9 @@ cdef class Cell:
     cpdef void set_value(self, object value):
         """Быстрая установка значения с обновлением типа данных для формул."""
         self.value = value
+        # Значення змінено вручну — комірка більше НЕ посилається на вихідний
+        # sharedString, інакше серіалізатор повторно віддав би старий індекс (D-4).
+        self._shared_string_index = -1
         # Простая эвристика: если это строка, начинающаяся с '=', считаем формулой
         if isinstance(value, str) and value.startswith('='):
             self.data_type = 'f'
@@ -119,6 +122,20 @@ cdef class Cell:
         letters.reverse()
         return "".join(letters)
 
+    cdef void _mark_modified(self):
+        """Позначити зміну стилю комірки: лист змінено (D-3) + xf застарів.
+
+        Скидаємо _style_id у -1, щоб серіалізатор/merge перебудував xf за поточним
+        (повним) Style комірки. Інакше зміна стилю вже-завантаженої комірки
+        (що мала s=) загубилась би — емітився б старий xfId.
+        """
+        self._style_id = -1
+        if self.parent is not None:
+            try:
+                self.parent._modified = True
+            except Exception:
+                pass
+
     # Прокси к style, совместимые с openpyxl
 
     @property
@@ -129,6 +146,7 @@ cdef class Cell:
     def font(self, value):
         # Стиль всегда существует, просто прокидываем ссылку
         self.style.font = value
+        self._mark_modified()
 
     @property
     def border(self):
@@ -137,6 +155,7 @@ cdef class Cell:
     @border.setter
     def border(self, value):
         self.style.border = value
+        self._mark_modified()
 
     @property
     def fill(self):
@@ -145,6 +164,7 @@ cdef class Cell:
     @fill.setter
     def fill(self, value):
         self.style.fill = value
+        self._mark_modified()
 
     @property
     def alignment(self):
@@ -153,6 +173,7 @@ cdef class Cell:
     @alignment.setter
     def alignment(self, value):
         self.style.alignment = value
+        self._mark_modified()
 
     @property
     def protection(self):
@@ -161,6 +182,7 @@ cdef class Cell:
     @protection.setter
     def protection(self, value):
         self.style.protection = value
+        self._mark_modified()
 
     @property
     def number_format(self):
@@ -174,3 +196,4 @@ cdef class Cell:
             from .styles import Style
             self.style = Style()
         self.style.numberFormat = fmt
+        self._mark_modified()
