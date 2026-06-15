@@ -3,7 +3,27 @@ from zipfile import ZipFile
 from lxml import etree
 from io import BytesIO
 from .worksheet import Worksheet
-from .styles import Style
+from .styles import (
+    Style,
+    font_from_element, fill_from_element, border_from_element,
+    alignment_from_element, protection_from_element,
+)
+
+
+def _worksheet_sort_key(path):
+    """Числовий ключ для 'xl/worksheets/sheetN.xml', щоб sheet10 йшов після sheet2."""
+    cdef str base = path.rsplit('/', 1)[-1]
+    cdef str digits = ''.join([ch for ch in base if ch.isdigit()])
+    return int(digits) if digits else 0
+
+
+cdef str _esc_xml_attr(str s):
+    """Екранує значення XML-атрибута (&, <, >, ") для генерації styles.xml."""
+    return (s.replace('&', '&amp;')
+             .replace('<', '&lt;')
+             .replace('>', '&gt;')
+             .replace('"', '&quot;'))
+
 
 # XML templates - делаем их константами на уровне модуля для производительности
 cdef str WORKBOOK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -32,11 +52,10 @@ cdef str MAIN_RELATIONSHIPS_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-
 </Relationships>"""
 
 cdef str STYLES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-    <numFmts count="{numFmts_count}">{numFmts}</numFmts>
-    <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
-    <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
-    <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{numFmts_section}
+    <fonts count="{fonts_count}">{fonts}</fonts>
+    <fills count="{fills_count}">{fills}</fills>
+    <borders count="{borders_count}">{borders}</borders>
     <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
     <cellXfs count="{cellXfs_count}">{cellXfs}</cellXfs>
     <!-- Минимальный набор для named style "Normal", как ожидает openpyxl -->
@@ -61,9 +80,7 @@ cdef class Workbook:
     cdef public int _active_sheet_index
     cdef public bint _lazy
     cdef public object _archive  # ZipFile | None
-    cdef dict _num_format_map      # map numberFormat string -> numFmtId
-    cdef dict _style_xf_map        # map Style id() -> xfId
-    cdef dict _xf_numfmt_map       # map xfId -> numberFormat (при чтении)
+    cdef dict _xf_style_map        # map xfId -> повний Style (при чтении styles.xml)
     cdef bytes _original_styles_xml  # оригинальный styles.xml из загруженного файла
     cdef bytes _original_shared_strings_xml  # оригинальный sharedStrings.xml
     cdef bytes _original_content_types_xml  # оригинальный [Content_Types].xml
@@ -80,9 +97,7 @@ cdef class Workbook:
         self._active_sheet_index = 0
         self._archive = _archive
         self._lazy = lazy
-        self._num_format_map = {}
-        self._style_xf_map = {}
-        self._xf_numfmt_map = {}
+        self._xf_style_map = {}
         self._original_styles_xml = None
         self._original_shared_strings_xml = None
         self._original_content_types_xml = None
@@ -91,7 +106,7 @@ cdef class Workbook:
 
         # ВАЖНО: если архив передан, навешиваем на него ссылку на Workbook,
         # чтобы Worksheet через self._archive._workbook_ref мог получить доступ
-        # к _xf_numfmt_map (NF-003).
+        # к _xf_style_map (стилям из styles.xml).
         if self._archive is not None:
             try:
                 setattr(self._archive, '_workbook_ref', self)
@@ -140,48 +155,81 @@ cdef class Workbook:
             self._original_styles_xml = xml  # сохраняем оригинал
             self._parse_styles(xml)
 
-        # --- Новое: читаем реальные имена листов из workbook.xml, если он есть ---
-        cdef dict sheetId_to_title = {}
-        cdef object root
-        cdef object sheets_elem
-        cdef object sheet_elem
-        cdef str sheet_id_str, title
-        if "xl/workbook.xml" in self._archive.namelist():
-            try:
-                xml = self._archive.read("xl/workbook.xml")
-                root = etree.fromstring(xml)
-                sheets_elem = root.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheets')
-                if sheets_elem is not None:
-                    for sheet_elem in sheets_elem.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'):
-                        title = sheet_elem.get('name')
-                        sheet_id_str = sheet_elem.get('sheetId')
-                        if title is not None and sheet_id_str is not None:
-                            sheetId_to_title[int(sheet_id_str)] = title
-            except Exception:
-                # В случае любой ошибки просто откатимся к именам по умолчанию
-                sheetId_to_title = {}
+        # --- Листи: порядок беремо з workbook.xml, файли резолвимо через rels (D-5) ---
+        # Раніше використовувалося лексикографічне сортування імен файлів +
+        # позиційне присвоєння sheetId, через що для файлів з 10+ листами дані
+        # "перемішувалися" (sheet10 йшов перед sheet2). Тепер резолвимо коректно:
+        # workbook.xml дає порядок і r:id, а workbook.xml.rels — r:id -> файл.
+        cdef list ordered_sheets = []      # [(title, rid)] у порядку workbook.xml
+        cdef dict rid_to_target = {}        # rId -> Target (відносно xl/)
+        cdef object root, sheets_elem, sheet_elem, rels_root, rel
+        cdef str title, rid, target, full_path
+        cdef str MAIN_NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        cdef str R_NS = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+        cdef bint used_rels = False
+        cdef set available
 
-        # Получаем и сортируем пути к листам
-        sheet_paths = [
+        if self._original_workbook_xml is not None:
+            try:
+                root = etree.fromstring(self._original_workbook_xml)
+                sheets_elem = root.find(MAIN_NS + 'sheets')
+                if sheets_elem is not None:
+                    for sheet_elem in sheets_elem.findall(MAIN_NS + 'sheet'):
+                        title = sheet_elem.get('name')
+                        rid = sheet_elem.get(R_NS + 'id')
+                        if title is not None:
+                            ordered_sheets.append((title, rid))
+            except Exception:
+                ordered_sheets = []
+
+        if self._original_workbook_rels_xml is not None:
+            try:
+                rels_root = etree.fromstring(self._original_workbook_rels_xml)
+                for rel in rels_root:
+                    rid = rel.get('Id')
+                    target = rel.get('Target')
+                    if rid is not None and target is not None:
+                        rid_to_target[rid] = target
+            except Exception:
+                rid_to_target = {}
+
+        available = set(
             p for p in self._archive.namelist()
             if p.startswith("xl/worksheets/") and p.endswith(".xml")
-        ]
-        sheet_paths.sort()
+        )
 
-        # Создаем листы
-        for idx, sheet_path in enumerate(sheet_paths):
-            # sheetId по спецификации начинается с 1
-            sheet_id = idx + 1
-            name = sheetId_to_title.get(sheet_id, f"sheet{sheet_id}")
-            ws = Worksheet(
-                self._shared_strings,
-                name,
-                self._archive,
-                sheet_path,
-                not lazy,
-                xf_numfmt_map=self._xf_numfmt_map,
-            )
-            self._sheets[name] = ws
+        # Основний шлях: порядок з workbook.xml + резолвинг r:id -> файл через rels
+        if ordered_sheets and rid_to_target:
+            for title, rid in ordered_sheets:
+                target = rid_to_target.get(rid) if rid is not None else None
+                if target is None:
+                    continue
+                if target.startswith('/'):
+                    full_path = target.lstrip('/')
+                else:
+                    full_path = 'xl/' + target
+                if full_path not in available:
+                    continue
+                ws = Worksheet(
+                    self._shared_strings, title, self._archive, full_path,
+                    not lazy, xf_style_map=self._xf_style_map,
+                )
+                self._sheets[title] = ws
+                used_rels = True
+
+        # Fallback (нема/неповні rels): числове сортування файлів + імена за позицією
+        if not used_rels:
+            sheet_paths = sorted(available, key=_worksheet_sort_key)
+            for idx, sheet_path in enumerate(sheet_paths):
+                if idx < len(ordered_sheets):
+                    name = ordered_sheets[idx][0]
+                else:
+                    name = f"sheet{idx + 1}"
+                ws = Worksheet(
+                    self._shared_strings, name, self._archive, sheet_path,
+                    not lazy, xf_style_map=self._xf_style_map,
+                )
+                self._sheets[name] = ws
 
     cdef void _add_sheet(self, str sheet_name):
         """Быстрое добавление листа"""
@@ -233,25 +281,27 @@ cdef class Workbook:
             self._shared_strings[i] = str(text_result) if text_result else ""
 
     cdef void _parse_styles(self, bytes xml_data):
-        """Простейший парсинг styles.xml для number_format.
+        """Повний парсинг styles.xml у мапу xfId -> Style (D-1).
 
-        Строим маппинг xfId -> number_format.
-        Поддерживаем только пользовательские numFmts и ссылку numFmtId в cellXfs.
+        Раніше витягувався лише number_format; тепер для кожного xf збираємо
+        повний Style (font/fill/border/alignment/protection/numberFormat) за
+        індексами fontId/fillId/borderId/numFmtId, як це робить openpyxl. Це дає
+        змогу читати реальні стилі завантаженого файлу через cell.font/fill/...
         """
+        cdef str MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
         cdef object root = etree.fromstring(xml_data)
         cdef dict num_fmt_by_id = {}
-        cdef object numFmts_elem
-        cdef object numFmt
+        cdef object numFmts_elem, numFmt, fonts_elem, fills_elem, borders_elem
         cdef str numFmtId_str, fmt_code
         cdef int numFmtId
 
-        # Добавляем builtin форматы по умолчанию (включая General)
+        # Builtin number formats (включаючи General)
         num_fmt_by_id.update(BUILTIN_NUMFMTS)
 
-        # Собираем numFmts: numFmtId -> formatCode
-        numFmts_elem = root.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}numFmts')
+        # numFmts: numFmtId -> formatCode
+        numFmts_elem = root.find(MAIN + 'numFmts')
         if numFmts_elem is not None:
-            for numFmt in numFmts_elem.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}numFmt'):
+            for numFmt in numFmts_elem.findall(MAIN + 'numFmt'):
                 numFmtId_str = numFmt.get('numFmtId')
                 fmt_code = numFmt.get('formatCode')
                 if numFmtId_str is None or fmt_code is None:
@@ -262,30 +312,78 @@ cdef class Workbook:
                     continue
                 num_fmt_by_id[numFmtId] = fmt_code
 
-        # Теперь cellXfs: индекс xf в списке -> numFmtId -> number_format
-        cdef object cellXfs_elem = root.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}cellXfs')
-        cdef object xf
+        # Індексовані таблиці компонентів: fonts / fills / borders
+        cdef list fonts = []
+        cdef list fills = []
+        cdef list borders = []
+        cdef object child
+
+        fonts_elem = root.find(MAIN + 'fonts')
+        if fonts_elem is not None:
+            for child in fonts_elem.findall(MAIN + 'font'):
+                fonts.append(font_from_element(child))
+
+        fills_elem = root.find(MAIN + 'fills')
+        if fills_elem is not None:
+            for child in fills_elem.findall(MAIN + 'fill'):
+                fills.append(fill_from_element(child))
+
+        borders_elem = root.find(MAIN + 'borders')
+        if borders_elem is not None:
+            for child in borders_elem.findall(MAIN + 'border'):
+                borders.append(border_from_element(child))
+
+        # cellXfs: для кожного xf будуємо повний Style за його посиланнями
+        cdef object cellXfs_elem = root.find(MAIN + 'cellXfs')
+        cdef object xf, align_elem, prot_elem
         cdef list xfs
-        cdef int idx
-        cdef str xf_numFmtId_str
+        cdef int idx, fontId, fillId, borderId
+        cdef object style
 
-        self._xf_numfmt_map.clear()
+        self._xf_style_map.clear()
 
-        if cellXfs_elem is not None:
-            xfs = cellXfs_elem.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}xf')
-            for idx, xf in enumerate(xfs):
-                xf_numFmtId_str = xf.get('numFmtId')
-                if xf_numFmtId_str is None:
-                    continue
-                try:
-                    numFmtId = int(xf_numFmtId_str)
-                except ValueError:
-                    continue
-                fmt_code = num_fmt_by_id.get(numFmtId)
-                if fmt_code is None and numFmtId in BUILTIN_NUMFMTS:
-                    fmt_code = BUILTIN_NUMFMTS[numFmtId]
-                if fmt_code is not None:
-                    self._xf_numfmt_map[idx] = fmt_code
+        if cellXfs_elem is None:
+            return
+
+        xfs = cellXfs_elem.findall(MAIN + 'xf')
+        for idx, xf in enumerate(xfs):
+            style = Style()
+
+            fontId = self._safe_int(xf.get('fontId'), -1)
+            if 0 <= fontId < len(fonts):
+                style.font = fonts[fontId].copy()
+
+            fillId = self._safe_int(xf.get('fillId'), -1)
+            if 0 <= fillId < len(fills):
+                style.fill = fills[fillId].copy()
+
+            borderId = self._safe_int(xf.get('borderId'), -1)
+            if 0 <= borderId < len(borders):
+                style.border = borders[borderId].copy()
+
+            numFmtId = self._safe_int(xf.get('numFmtId'), 0)
+            fmt_code = num_fmt_by_id.get(numFmtId)
+            if fmt_code is not None:
+                style.numberFormat = fmt_code
+
+            align_elem = xf.find(MAIN + 'alignment')
+            if align_elem is not None:
+                style.alignment = alignment_from_element(align_elem)
+
+            prot_elem = xf.find(MAIN + 'protection')
+            if prot_elem is not None:
+                style.protection = protection_from_element(prot_elem)
+
+            self._xf_style_map[idx] = style
+
+    cdef int _safe_int(self, object value, int default):
+        """Безпечний парсинг цілого з XML-атрибута (None/некоректне -> default)."""
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
 
     def create_sheet(self, str title = None):
         """
@@ -450,31 +548,32 @@ cdef class Workbook:
 
     cdef bytes _get_styles_xml(self):
         """Генерация styles.xml.
-        
-        Если файл был загружен и есть оригинальный styles.xml - используем его.
-        Иначе генерируем minimal styles.xml, совместимый с openpyxl.
+
+        Для загруженной книги возвращаем оригинальный styles.xml (COMPAT-2: не
+        теряем компоненты, которые мы не моделируем — themes, dxfs, indexed colors
+        и т.д.). Для новой книги строим полный дедуплицированный styles.xml
+        (fonts/fills/borders/numFmts + cellXfs со ссылками), чтобы визуальные стили
+        (D-2) сохранялись и читались openpyxl.
         """
-        # Если есть оригинальный styles.xml - возвращаем его
         if self._original_styles_xml is not None:
             return self._original_styles_xml
-            
-        # Иначе генерируем новый
-        cdef str numFmts_xml, cellXfs_xml
-        cdef int numFmts_count, cellXfs_count
 
-        numFmts_xml, cellXfs_xml = self._collect_styles()
-        numFmts_count = 0 if not numFmts_xml else len(self._num_format_map)
-        cellXfs_count = 1 if not cellXfs_xml else len(self._style_xf_map)
+        cdef str numFmts_xml, fonts_xml, fills_xml, borders_xml, cellXfs_xml, numFmts_section
+        cdef int numFmts_count, fonts_count, fills_count, borders_count, cellXfs_count
 
-        if not cellXfs_xml:
-            # хотя бы один xf по умолчанию (xfId=0)
-            cellXfs_xml = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        (numFmts_xml, fonts_xml, fills_xml, borders_xml, cellXfs_xml,
+         numFmts_count, fonts_count, fills_count, borders_count, cellXfs_count) = self._collect_styles()
+
+        numFmts_section = ''
+        if numFmts_count > 0:
+            numFmts_section = f'\n    <numFmts count="{numFmts_count}">{numFmts_xml}</numFmts>'
 
         return STYLES_XML_TEMPLATE.format(
-            numFmts_count=numFmts_count,
-            numFmts=numFmts_xml,
-            cellXfs_count=cellXfs_count,
-            cellXfs=cellXfs_xml,
+            numFmts_section=numFmts_section,
+            fonts=fonts_xml, fonts_count=fonts_count,
+            fills=fills_xml, fills_count=fills_count,
+            borders=borders_xml, borders_count=borders_count,
+            cellXfs=cellXfs_xml, cellXfs_count=cellXfs_count,
         ).encode('utf-8')
 
     def save_virtual_workbook(self) -> bytes:
@@ -583,56 +682,136 @@ cdef class Workbook:
             self._archive.close()
             self._archive = None
 
-    cdef void _reset_style_caches(self):
-        self._num_format_map.clear()
-        self._style_xf_map.clear()
+    cdef str _build_xf(self, int numFmtId, int fontId, int fillId, int borderId,
+                       str align_xml, str prot_xml):
+        """Будує <xf> для cellXfs з реальними посиланнями та apply*-прапорцями."""
+        cdef list attrs = [
+            f'numFmtId="{numFmtId}"', f'fontId="{fontId}"',
+            f'fillId="{fillId}"', f'borderId="{borderId}"', 'xfId="0"',
+        ]
+        if numFmtId != 0:
+            attrs.append('applyNumberFormat="1"')
+        if fontId != 0:
+            attrs.append('applyFont="1"')
+        if fillId != 0:
+            attrs.append('applyFill="1"')
+        if borderId != 0:
+            attrs.append('applyBorder="1"')
+        if align_xml:
+            attrs.append('applyAlignment="1"')
+        if prot_xml:
+            attrs.append('applyProtection="1"')
+        cdef str head = '<xf ' + ' '.join(attrs)
+        if align_xml or prot_xml:
+            return head + '>' + align_xml + prot_xml + '</xf>'
+        return head + '/>'
 
     cdef tuple _collect_styles(self):
-        """Собирает используемые number_format из всех ячеек и строит таблицы numFmts и cellXfs.
+        """Будує дедуплікований реєстр стилів для НОВОЇ книги (D-2).
 
-        Возвращает кортеж (numFmts_xml, cellXfs_xml).
+        Обходить усі комірки; кожен компонент (font/fill/border/numFmt)
+        дедуплікується за його XML-представленням, cellXfs отримує реальні
+        посилання fontId/fillId/borderId/numFmtId. У cell._style_id зберігається
+        кінцевий xfId (для не-дефолтних стилів). Резервуються індекси 0 (дефолт)
+        та fillId 0=none/1=gray125, як вимагає Excel.
+
+        Повертає (numFmts_xml, fonts_xml, fills_xml, borders_xml, cellXfs_xml,
+                  numFmts_count, fonts_count, fills_count, borders_count, cellXfs_count).
         """
-        cdef dict num_format_map = {}
-        cdef dict style_xf_map = {}
-        cdef list numFmt_elems = []
+        cdef dict font_ids = {}
+        cdef dict fill_ids = {}
+        cdef dict border_ids = {}
+        cdef dict numfmt_ids = {}
+        cdef dict xf_ids = {}
+        cdef list font_elems = []
+        cdef list fill_elems = []
+        cdef list border_elems = []
+        cdef list numfmt_elems = []
         cdef list xf_elems = []
-        cdef int next_numFmtId = 164  # начинаем с диапазона пользовательских форматов
-        cdef int next_xfId = 0
-        cdef object sheet, cell
-        cdef str fmt
-        cdef int numFmtId, xfId
+        cdef int next_numFmtId = 164
+        cdef object sheet, cell, st
+        cdef str font_xml, fill_xml, border_xml, fmt, align_xml, prot_xml, xf_xml
+        cdef int fontId, fillId, borderId, numFmtId, xfId
+
+        # Зарезервовані дефолти (індекс 0 кожної таблиці)
+        cdef str default_font = '<font><sz val="11"/><name val="Calibri"/></font>'
+        cdef str none_fill = '<fill><patternFill patternType="none"/></fill>'
+        cdef str gray_fill = '<fill><patternFill patternType="gray125"/></fill>'
+        cdef str default_border = '<border><left/><right/><top/><bottom/><diagonal/></border>'
+        cdef str default_xf = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+
+        font_ids[default_font] = 0
+        font_elems.append(default_font)
+        fill_ids[none_fill] = 0
+        fill_ids[gray_fill] = 1
+        fill_elems.append(none_fill)
+        fill_elems.append(gray_fill)
+        border_ids[default_border] = 0
+        border_elems.append(default_border)
+        xf_ids[default_xf] = 0
+        xf_elems.append(default_xf)
 
         for sheet in self._sheets.values():
             for cell in getattr(sheet, '_cells', {}).values():
-                if cell.style is None:
+                st = cell.style
+                if st is None:
+                    cell._style_id = -1
                     continue
-                fmt = getattr(cell.style, 'numberFormat', None)
-                if not fmt:
-                    continue
-                # Регистрируем numFmt
-                if fmt in num_format_map:
-                    numFmtId = num_format_map[fmt]
-                else:
-                    numFmtId = next_numFmtId
-                    next_numFmtId += 1
-                    num_format_map[fmt] = numFmtId
-                    numFmt_elems.append(f'<numFmt numFmtId="{numFmtId}" formatCode="{fmt}"/>')
-                # Регистрируем xf для стиля
-                xf_key = id(cell.style)
-                if xf_key in style_xf_map:
-                    xfId = style_xf_map[xf_key]
-                else:
-                    xfId = next_xfId
-                    next_xfId += 1
-                    style_xf_map[xf_key] = xfId
-                    xf_elems.append(f'<xf numFmtId="{numFmtId}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>')
-                # Сохраняем xfId прямо в объект ячейки для использования при генерации sheet XML
-                cell._style_id = xfId
 
-        self._num_format_map = num_format_map
-        self._style_xf_map = style_xf_map
+                # font
+                font_xml = st.font._to_xml() if st.font is not None else default_font
+                fontId = font_ids.get(font_xml, -1)
+                if fontId == -1:
+                    fontId = len(font_elems)
+                    font_ids[font_xml] = fontId
+                    font_elems.append(font_xml)
 
-        return "".join(numFmt_elems), "".join(xf_elems)
+                # fill
+                fill_xml = st.fill._to_xml() if st.fill is not None else none_fill
+                fillId = fill_ids.get(fill_xml, -1)
+                if fillId == -1:
+                    fillId = len(fill_elems)
+                    fill_ids[fill_xml] = fillId
+                    fill_elems.append(fill_xml)
+
+                # border
+                border_xml = st.border._to_xml() if st.border is not None else default_border
+                borderId = border_ids.get(border_xml, -1)
+                if borderId == -1:
+                    borderId = len(border_elems)
+                    border_ids[border_xml] = borderId
+                    border_elems.append(border_xml)
+
+                # numFmt (General/None -> 0; інші -> користувацький numFmtId >= 164)
+                numFmtId = 0
+                fmt = st.numberFormat
+                if fmt and fmt != 'General':
+                    numFmtId = numfmt_ids.get(fmt, -1)
+                    if numFmtId == -1:
+                        numFmtId = next_numFmtId
+                        next_numFmtId += 1
+                        numfmt_ids[fmt] = numFmtId
+                        numfmt_elems.append(f'<numFmt numFmtId="{numFmtId}" formatCode="{_esc_xml_attr(fmt)}"/>')
+
+                align_xml = st.alignment._to_xml() if st.alignment is not None else ''
+                prot_xml = st.protection._to_xml() if st.protection is not None else ''
+
+                xf_xml = self._build_xf(numFmtId, fontId, fillId, borderId, align_xml, prot_xml)
+                xfId = xf_ids.get(xf_xml, -1)
+                if xfId == -1:
+                    xfId = len(xf_elems)
+                    xf_ids[xf_xml] = xfId
+                    xf_elems.append(xf_xml)
+
+                # Дефолтний стиль (xfId=0) не вимагає атрибута s= у комірці
+                cell._style_id = xfId if xfId > 0 else -1
+
+        return (
+            "".join(numfmt_elems), "".join(font_elems), "".join(fill_elems),
+            "".join(border_elems), "".join(xf_elems),
+            len(numfmt_elems), len(font_elems), len(fill_elems),
+            len(border_elems), len(xf_elems),
+        )
 
     def __getitem__(self, str key):
         """Доступ к листу по имени через синтаксис wb['Sheet1'], совместимый с openpyxl."""

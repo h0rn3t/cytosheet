@@ -38,7 +38,7 @@ cdef class Worksheet:
     cdef public bint _preloaded
     cdef public bint _is_small_file
     cdef public list _merged_cells  # List[str]
-    cdef public dict _xf_numfmt_map
+    cdef public dict _xf_style_map  # xfId -> Style (повні стилі з styles.xml)
     cdef public dict _row_dimensions   # int -> RowDimension (внутреннее хранилище)
     cdef public dict _column_dimensions  # str -> ColumnDimension (внутреннее хранилище)
     cdef object _row_dim_container
@@ -53,7 +53,7 @@ cdef class Worksheet:
             object archive = None,
             str _sheet_path = None,
             bint _preload = True,
-            dict xf_numfmt_map = None
+            dict xf_style_map = None
     ):
         self.title = title
         self._shared_strings = shared_strings if shared_strings is not None else []
@@ -65,7 +65,7 @@ cdef class Worksheet:
         self._merged_cells = []
         self._max_row = 0
         self._max_column = 0
-        self._xf_numfmt_map = xf_numfmt_map if xf_numfmt_map is not None else {}
+        self._xf_style_map = xf_style_map if xf_style_map is not None else {}
         self._row_dimensions = {}
         self._column_dimensions = {}
         self._row_dim_container = RowDimensionContainer(self)
@@ -126,6 +126,45 @@ cdef class Worksheet:
             col_num = self._col_to_num(coord[:i])
             if col_num > self._max_column:
                 self._max_column = col_num
+
+    cdef object _style_for_xf(self, int style_idx):
+        """Повертає КОПІЮ повного Style за xfId (або None, якщо стилю немає).
+
+        Копія потрібна, щоб правка стилю однієї комірки не "протікала" на інші
+        комірки з тим самим xf (D-6). Стилі будує Workbook у _xf_style_map (D-1).
+        """
+        cdef object st
+        if self._xf_style_map:
+            st = self._xf_style_map.get(style_idx)
+            if st is not None:
+                return st.copy()
+        return None
+
+    cdef bint _apply_style_simple(self, object cell, str xml_str, int cell_start, int cell_end):
+        """Парсить s="..." у діапазоні [cell_start,cell_end), проставляє cell._style_id
+        і повний Style. Повертає True, якщо атрибут s= знайдено (для string-парсера)."""
+        cdef int s_start = xml_str.find('s="', cell_start, cell_end)
+        cdef int s_end, style_idx
+        cdef object st
+        if s_start == -1:
+            # Немає s= → комірка успадковує дефолтний стиль книги (xf=0), як openpyxl
+            st = self._style_for_xf(0)
+            if st is not None:
+                cell.style = st
+            return False
+        s_start += 3
+        s_end = xml_str.find('"', s_start, cell_end)
+        if s_end == -1:
+            return False
+        try:
+            style_idx = int(xml_str[s_start:s_end])
+        except ValueError:
+            return False
+        cell._style_id = style_idx
+        st = self._style_for_xf(style_idx)
+        if st is not None:
+            cell.style = st
+        return True
 
     # ------------------------------------------------------------------
     # Парсинг листа з XML
@@ -274,7 +313,7 @@ cdef class Worksheet:
             pos = row_tag_end + 1
 
     cdef void _parse_sheet_simple(self, bytes xml_data):
-        """Упрощённый string-based парсер для малых файлов с поддержкой формул.<f> и number_format."""
+        """Упрощённый string-based парсер для малых файлов с поддержкой формул.<f> и полного Style."""
         cdef str xml_str = xml_data.decode('utf-8')
         self._parse_row_col_dimensions_simple(xml_str)
 
@@ -282,13 +321,9 @@ cdef class Worksheet:
         cdef int start_pos = 0
         cdef int cell_start, cell_end
         cdef int r_start, r_end, t_start, t_end, v_start, v_end, f_start, f_end
-        cdef int s_start, s_end
-        cdef str cell_ref, cell_type, raw_value, formula_text, s_attr
+        cdef str cell_ref, cell_type, raw_value, formula_text
         cdef object value, cell
         cdef int shared_index
-        cdef object style
-        cdef int style_idx
-        cdef str fmt_code
         cdef int is_start, t2_start, t2_end
         cdef int row_tag_start, row_tag_end, row_idx
         cdef str row_tag
@@ -382,25 +417,7 @@ cdef class Worksheet:
             # Если это самозакрывающийся тег - создаем пустую ячейку со стилем
             if is_self_closing:
                 cell = Cell(position=cell_ref, value=None, parent=self)
-                # Парсим стиль
-                s_start = xml_str.find('s="', cell_start, cell_end)
-                if s_start != -1:
-                    s_start += 3
-                    s_end = xml_str.find('"', s_start, cell_end)
-                    if s_end != -1:
-                        s_attr = xml_str[s_start:s_end]
-                        try:
-                            style_idx = int(s_attr)
-                            cell._style_id = style_idx
-                            if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                                fmt_code = self._xf_numfmt_map.get(style_idx)
-                                if fmt_code is not None:
-                                    from .styles import Style
-                                    style = Style()
-                                    style.numberFormat = fmt_code
-                                    cell.style = style
-                        except ValueError:
-                            pass
+                self._apply_style_simple(cell, xml_str, cell_start, cell_end)
                 self._cells[cell_ref] = cell
                 start_pos = cell_end + 2  # +2 для />
                 continue
@@ -424,23 +441,7 @@ cdef class Worksheet:
                     value = '=' + formula_text
                     cell = Cell(position=cell_ref, value=value, parent=self)
                     cell.data_type = 'f'
-                    if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                        s_start = xml_str.find('s="', cell_start, cell_end)
-                        if s_start != -1:
-                            s_start += 3
-                            s_end = xml_str.find('"', s_start, cell_end)
-                            if s_end != -1:
-                                s_attr = xml_str[s_start:s_end]
-                                try:
-                                    style_idx = int(s_attr)
-                                    fmt_code = self._xf_numfmt_map.get(style_idx)
-                                    if fmt_code is not None:
-                                        from .styles import Style
-                                        style = Style()
-                                        style.numberFormat = fmt_code
-                                        cell.style = style
-                                except ValueError:
-                                    pass
+                    self._apply_style_simple(cell, xml_str, cell_start, cell_end)
                     self._cells[cell_ref] = cell
                     start_pos = cell_end + 4
                     continue
@@ -457,23 +458,7 @@ cdef class Worksheet:
                             raw_value = xml_str[t2_start:t2_end]
                             value = raw_value
                             cell = Cell(position=cell_ref, value=value, parent=self)
-                            if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                                s_start = xml_str.find('s="', cell_start, cell_end)
-                                if s_start != -1:
-                                    s_start += 3
-                                    s_end = xml_str.find('"', s_start, cell_end)
-                                    if s_end != -1:
-                                        s_attr = xml_str[s_start:s_end]
-                                        try:
-                                            style_idx = int(s_attr)
-                                            fmt_code = self._xf_numfmt_map.get(style_idx)
-                                            if fmt_code is not None:
-                                                from .styles import Style
-                                                style = Style()
-                                                style.numberFormat = fmt_code
-                                                cell.style = style
-                                        except ValueError:
-                                            pass
+                            self._apply_style_simple(cell, xml_str, cell_start, cell_end)
                             self._cells[cell_ref] = cell
                             start_pos = cell_end + 4
                             continue
@@ -514,27 +499,8 @@ cdef class Worksheet:
                     cell.data_type = cell_type
 
             # Сохраняем ячейку если есть значение ИЛИ стиль
-            has_style = False
-            s_start = xml_str.find('s="', cell_start, cell_end)
-            if s_start != -1:
-                s_start += 3
-                s_end = xml_str.find('"', s_start, cell_end)
-                if s_end != -1:
-                    s_attr = xml_str[s_start:s_end]
-                    try:
-                        style_idx = int(s_attr)
-                        cell._style_id = style_idx  # Сохраняем для генерации XML
-                        has_style = True
-                        if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                            fmt_code = self._xf_numfmt_map.get(style_idx)
-                            if fmt_code is not None:
-                                from .styles import Style
-                                style = Style()
-                                style.numberFormat = fmt_code
-                                cell.style = style
-                    except ValueError:
-                        pass
-            
+            has_style = self._apply_style_simple(cell, xml_str, cell_start, cell_end)
+
             if value is not None or has_style:
                 self._cells[cell_ref] = cell
 
@@ -801,21 +767,22 @@ cdef class Worksheet:
                         if cell_type:
                             cell.data_type = cell_type
 
-                # Применяем number_format и сохраняем style_id
+                # Применяем полный Style по xfId и сохраняем style_id
                 s_attr = cell_elem.get('s')
                 if s_attr is not None:
                     try:
                         style_idx = int(s_attr)
                         cell._style_id = style_idx  # Сохраняем для генерации XML
-                        if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                            fmt_code = self._xf_numfmt_map.get(style_idx)
-                            if fmt_code is not None:
-                                from .styles import Style
-                                style = Style()
-                                style.numberFormat = fmt_code
-                                cell.style = style
+                        style = self._style_for_xf(style_idx)
+                        if style is not None:
+                            cell.style = style
                     except ValueError:
                         pass
+                else:
+                    # Немає s= → дефолтний стиль книги (xf=0), как openpyxl
+                    style = self._style_for_xf(0)
+                    if style is not None:
+                        cell.style = style
 
                 temp_cells[col_ref] = cell
                 cell_elem.clear()
@@ -982,21 +949,22 @@ cdef class Worksheet:
                         if cell_type:
                             cell.data_type = cell_type
 
-                # Применяем number_format и сохраняем style_id
+                # Применяем полный Style по xfId и сохраняем style_id
                 s_attr = cell_elem.get('s')
                 if s_attr is not None:
                     try:
                         style_idx = int(s_attr)
                         cell._style_id = style_idx
-                        if self._xf_numfmt_map is not None and self._xf_numfmt_map:
-                            fmt_code = self._xf_numfmt_map.get(style_idx)
-                            if fmt_code is not None:
-                                from .styles import Style
-                                style = Style()
-                                style.numberFormat = fmt_code
-                                cell.style = style
+                        style = self._style_for_xf(style_idx)
+                        if style is not None:
+                            cell.style = style
                     except ValueError:
                         pass
+                else:
+                    # Немає s= → дефолтний стиль книги (xf=0), как openpyxl
+                    style = self._style_for_xf(0)
+                    if style is not None:
+                        cell.style = style
 
                 temp_batch[col_ref] = cell
                 processed_count += 1
@@ -1067,10 +1035,14 @@ cdef class Worksheet:
                 cell.set_value(value)
             else:
                 cell.value = value
+                cell._shared_string_index = -1
                 if isinstance(value, str) and value.startswith('='):
                     cell.data_type = 'f'
 
         self._update_bounds_for_cell(key)
+        # Присвоєння через індексатор змінює лист — інакше save завантаженої
+        # книги повернув би оригінальний XML і втратив зміну (D-3).
+        self._modified = True
 
     # ------------------------------------------------------------------
     # openpyxl-совместный доступ к ячейкам по row/column + append/max_*.
@@ -1382,6 +1354,8 @@ cdef class Worksheet:
         if range_string not in self._merged_cells:
             self._merged_cells.append(range_string)
 
+        self._modified = True
+
         start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num = self._parse_range(range_string)
 
         for row in range(start_row, end_row + 1):
@@ -1412,6 +1386,7 @@ cdef class Worksheet:
             return
 
         self._merged_cells.remove(range_string)
+        self._modified = True
 
         start_ref, end_ref, start_col, start_row, end_col, end_row, start_col_num, end_col_num = self._parse_range(range_string)
 
@@ -1577,6 +1552,9 @@ class RowDimensionContainer(MutableMapping):
         if rdim is None:
             rdim = RowDimension(idx)
             self._ws._row_dimensions[idx] = rdim
+        # Доступ до розмірів зазвичай передує їх зміні — позначаємо лист зміненим,
+        # щоб save завантаженої книги відобразив нову висоту/ширину (D-3).
+        self._ws._modified = True
         return rdim
 
     def __setitem__(self, key, value):
@@ -1609,6 +1587,7 @@ class ColumnDimensionContainer(MutableMapping):
         if cdim is None:
             cdim = ColumnDimension(col)
             self._ws._column_dimensions[col] = cdim
+        self._ws._modified = True
         return cdim
 
     def __setitem__(self, key, value):
