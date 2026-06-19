@@ -29,6 +29,6 @@ def load_workbook(
     # он имеет приоритет над read_only для внутреннего флага.
     cdef bint use_lazy = lazy or read_only
     wb = Workbook(_archive=archive, lazy=use_lazy)
-    # даём Worksheet доступ к _xf_numfmt_map через ссылку на книгу
+    # даём Worksheet доступ к _xf_style_map через ссылку на книгу
     setattr(archive, '_workbook_ref', wb)
     return wb

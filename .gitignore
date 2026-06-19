@@ -1,2 +1,26 @@
+# IDE / editor
 .idea
-build
+.vscode
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Cython generated (не комітимо — генеруються build_ext)
+*.c
+*.so
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Virtual envs
+venv/
+.venv/
+
+# OS
+.DS_Store
+
+# Local agent standard
+CLAUDE.md
