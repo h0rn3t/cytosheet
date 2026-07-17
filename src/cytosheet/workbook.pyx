@@ -81,6 +81,7 @@ cdef class Workbook:
     cdef public int _active_sheet_index
     cdef public bint _lazy
     cdef public object _archive  # ZipFile | None
+    cdef public bint _closed  # книга була завантажена з архіву і архів закрито
     cdef dict _xf_style_map        # map xfId -> повний Style (при чтении styles.xml)
     cdef bytes _original_styles_xml  # оригинальный styles.xml из загруженного файла
     cdef bytes _original_shared_strings_xml  # оригинальный sharedStrings.xml
@@ -98,6 +99,7 @@ cdef class Workbook:
         self._active_sheet_index = 0
         self._archive = _archive
         self._lazy = lazy
+        self._closed = False
         self._xf_style_map = {}
         self._original_styles_xml = None
         self._original_shared_strings_xml = None
@@ -586,6 +588,8 @@ cdef class Workbook:
         cdef int i
         cdef object sheet
 
+        self._check_open()
+
         with ZipFile(buffer, 'w', compression=ZIP_DEFLATED) as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
@@ -621,7 +625,9 @@ cdef class Workbook:
         cdef bytes data
         cdef str dir_path
         cdef object sheet
-        
+
+        self._check_open()
+
         # Поддержка file-like объектов (BytesIO, StringIO и т.д.)
         is_file_like = hasattr(file_path, 'write')
         
@@ -683,6 +689,18 @@ cdef class Workbook:
         if self._archive is not None:
             self._archive.close()
             self._archive = None
+            # Позначаємо саме факт закриття завантаженої книги: у lazy-режимі
+            # оригінальні XML листів у памʼяті не тримаються, тож після close
+            # зберегти їх нізвідки — save має впасти, а не писати порожні листи.
+            self._closed = True
+
+    cdef _check_open(self):
+        """Заборонити збереження книги, архів якої вже закрито (design D7.3)."""
+        if self._closed:
+            raise ValueError(
+                "Cannot save a workbook after close(): the source archive is no "
+                "longer available to read unmodified sheets from."
+            )
 
     cdef str _build_xf(self, int numFmtId, int fontId, int fillId, int borderId,
                        str align_xml, str prot_xml):

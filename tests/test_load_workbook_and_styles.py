@@ -369,3 +369,36 @@ def test_various_number_formats_roundtrip(tmp_path):
     # Текстовый формат '@' мы пока явно не поддерживаем, он может не подтянуться
     # поэтому просто убеждаемся, что чтение не сломалось и значение есть
     assert ws["C1"].value == "Text"
+
+
+def test_inlinestr_read_in_standard_parser(tmp_path):
+    """Scenario: inlineStr читається кожною стратегією парсингу (D-9).
+
+    openpyxl пише `t="inlineStr"` (<is><t>) за замовчуванням, а standard/chunked
+    парсери шукали лише <v> — тож будь-який великий openpyxl-файл читався зі
+    стовпцями None. Файл навмисно >50 KB, щоб піти повз simple-парсер, який
+    inlineStr умів і маскував дефект.
+    """
+    import zipfile
+
+    src = tmp_path / "inline_big.xlsx"
+    wb_ox = OpenpyxlWorkbook()
+    ws_ox = wb_ox.active
+    for i in range(1500):
+        ws_ox.append([f"рядок-{i}", i])
+    wb_ox.save(str(src))
+
+    with zipfile.ZipFile(str(src)) as z:
+        sheet_part = next(n for n in z.namelist()
+                          if n.startswith("xl/worksheets/") and n.endswith(".xml"))
+        assert b't="inlineStr"' in z.read(sheet_part), "openpyxl не написав inlineStr — тест нічого не доводить"
+        assert z.getinfo(sheet_part).file_size >= 50000, "файл замалий — піде через simple-парсер"
+
+    ws = load_workbook(str(src)).active
+    assert ws["A1"].value == "рядок-0"
+    assert ws["A1500"].value == "рядок-1499"
+    assert ws["B1500"].value == 1499
+
+    # Паритет із openpyxl на всьому листі
+    expected = list(openpyxl_load_workbook(str(src)).active.iter_rows(values_only=True))
+    assert list(ws.iter_rows(values_only=True)) == expected

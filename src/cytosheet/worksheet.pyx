@@ -4,6 +4,9 @@ from collections.abc import MutableMapping
 
 from .cell import Cell
 
+# Namespace SpreadsheetML — у Clark-нотації lxml
+cdef str _NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+
 
 cdef class RowDimension:
     cdef public int index
@@ -73,17 +76,23 @@ cdef class Worksheet:
         self._original_xml = None
         self._modified = False
         
-        # Если загружаем из архива - сохраняем оригинальный XML
-        if self._archive is not None and self._sheet_path is not None:
+        # Розмір листа беремо з ZIP-каталогу (file_size = розпакований розмір),
+        # а не з len(прочитаного XML): у lazy читати entry заради вибору
+        # стратегії означало б матеріалізувати лист. Рахуємо в обох режимах,
+        # інакше lazy-фолбек у _materialize завжди брав би _parse_sheet.
+        if archive is not None and _sheet_path is not None:
             try:
-                self._original_xml = self._archive.read(self._sheet_path)
-            except Exception:
-                pass
+                self._is_small_file = archive.getinfo(_sheet_path).file_size < 50000  # ~500 строк
+            except KeyError:
+                self._is_small_file = False
 
+        # XML листа читаємо з архіву РІВНО ОДИН РАЗ і тільки в eager-режимі.
+        # У lazy-режимі не читаємо взагалі: для ітерації потрібен потік
+        # (див. iter_rows), а для save оригінал дочитується на вимогу в
+        # get_xml_data. Інакше lazy тримав би O(розмір листа) ще до розбору.
         if archive is not None and _preload and _sheet_path is not None:
             xml = archive.read(_sheet_path)
-            xml_size = len(xml)
-            self._is_small_file = xml_size < 50000  # ~500 строк
+            self._original_xml = xml
             if self._is_small_file:
                 self._parse_sheet_simple(xml)
             else:
@@ -725,47 +734,10 @@ cdef class Worksheet:
                     cell_elem.clear()
                     continue
 
-                # Формула
-                f_elem = cell_elem.find('main:f', namespaces=ns)
-                if f_elem is not None and f_elem.text is not None:
-                    value = '=' + f_elem.text
-                    cell = Cell(position=col_ref, value=value, parent=self)
-                    cell.data_type = 'f'
-                else:
-                    cell_type = cell_elem.get('t')
-                    v_elem = cell_elem.find('main:v', namespaces=ns)
-                    if v_elem is None:
-                        cell_elem.clear()
-                        continue
-
-                    raw = v_elem.text
-                    if raw is None:
-                        cell_elem.clear()
-                        continue
-
-                    if cell_type == 's':
-                        try:
-                            shared_string_index = int(raw)
-                            if 0 <= shared_string_index < len(self._shared_strings):
-                                value = self._shared_strings[shared_string_index]
-                                # Создаем ячейку и сохраняем индекс
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                                cell._shared_string_index = shared_string_index
-                                cell.data_type = 's'
-                            else:
-                                value = raw
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                        except (ValueError, TypeError):
-                            value = raw
-                            cell = Cell(position=col_ref, value=value, parent=self)
-                    else:
-                        value = self._convert_cell_value_fast(raw)
-                        if value is None:
-                            cell_elem.clear()
-                            continue
-                        cell = Cell(position=col_ref, value=value, parent=self)
-                        if cell_type:
-                            cell.data_type = cell_type
+                cell = self._cell_from_element(cell_elem, col_ref, ns)
+                if cell is None:
+                    cell_elem.clear()
+                    continue
 
                 # Применяем полный Style по xfId и сохраняем style_id
                 s_attr = cell_elem.get('s')
@@ -790,6 +762,65 @@ cdef class Worksheet:
             print(f"Ошибка стандартного парсинга: {e}")
         finally:
             self._cells.update(temp_cells)
+
+    cdef object _cell_from_element(self, object cell_elem, str col_ref, dict ns):
+        """`Cell` з елемента `<c>` для standard/chunked парсерів; `None` → пропустити.
+
+        Спільна для обох парсерів свідомо: раніше кожен мав власну копію цього
+        блоку, і `inlineStr` випав з обох (D-9), тоді як simple-парсер його вмів.
+        Одне джерело правди тут дешевше за синхронізацію трьох (CS-7).
+        """
+        cdef str cell_type, raw
+        cdef object f_elem, v_elem, is_elem, cell, value
+        cdef int shared_string_index
+
+        # Формула має пріоритет над кешованим <v> (сумісно з openpyxl без data_only)
+        f_elem = cell_elem.find('main:f', namespaces=ns)
+        if f_elem is not None and f_elem.text is not None:
+            cell = Cell(position=col_ref, value='=' + f_elem.text, parent=self)
+            cell.data_type = 'f'
+            return cell
+
+        cell_type = cell_elem.get('t')
+
+        # inlineStr: <c t="inlineStr"><is><t>Text</t></is></c> — БЕЗ <v>.
+        # openpyxl пише саме так за замовчуванням, тож без цієї гілки будь-який
+        # великий openpyxl-файл читався стовпцями None (D-9).
+        if cell_type == 'inlineStr':
+            is_elem = cell_elem.find('main:is', namespaces=ns)
+            if is_elem is None:
+                return None
+            # itertext() замість find('main:t'): склеює rich-text runs (<r><t>..)
+            cell = Cell(position=col_ref, value=''.join(is_elem.itertext()), parent=self)
+            cell.data_type = 's'
+            return cell
+
+        v_elem = cell_elem.find('main:v', namespaces=ns)
+        if v_elem is None or v_elem.text is None:
+            return None
+        raw = v_elem.text
+
+        if cell_type == 's':
+            try:
+                shared_string_index = int(raw)
+            except (ValueError, TypeError):
+                return Cell(position=col_ref, value=raw, parent=self)
+            if 0 <= shared_string_index < len(self._shared_strings):
+                cell = Cell(position=col_ref, value=self._shared_strings[shared_string_index], parent=self)
+                # Індекс лишаємо: незмінена комірка серіалізується назад тим самим
+                # sharedString (скидається при зміні значення — D-4)
+                cell._shared_string_index = shared_string_index
+                cell.data_type = 's'
+                return cell
+            return Cell(position=col_ref, value=raw, parent=self)
+
+        value = self._convert_cell_value_fast(raw)
+        if value is None:
+            return None
+        cell = Cell(position=col_ref, value=value, parent=self)
+        if cell_type:
+            cell.data_type = cell_type
+        return cell
 
     cdef void _parse_sheet_chunked(self, bytes xml_data):
         """Чанковый парсер для больших файлов с поддержкой <f>."""
@@ -908,46 +939,10 @@ cdef class Worksheet:
                     cell_elem.clear()
                     continue
 
-                # Формула
-                f_elem = cell_elem.find('main:f', namespaces=ns)
-                if f_elem is not None and f_elem.text is not None:
-                    value = '=' + f_elem.text
-                    cell = Cell(position=col_ref, value=value, parent=self)
-                    cell.data_type = 'f'
-                else:
-                    cell_type = cell_elem.get('t')
-                    v_elem = cell_elem.find('main:v', namespaces=ns)
-                    if v_elem is None:
-                        cell_elem.clear()
-                        continue
-
-                    raw = v_elem.text
-                    if raw is None:
-                        cell_elem.clear()
-                        continue
-
-                    if cell_type == 's':
-                        try:
-                            shared_string_index = int(raw)
-                            if 0 <= shared_string_index < len(self._shared_strings):
-                                value = self._shared_strings[shared_string_index]
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                                cell._shared_string_index = shared_string_index
-                                cell.data_type = 's'
-                            else:
-                                value = raw
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                        except (ValueError, TypeError):
-                            value = raw
-                            cell = Cell(position=col_ref, value=value, parent=self)
-                    else:
-                        value = self._convert_cell_value_fast(raw)
-                        if value is None:
-                            cell_elem.clear()
-                            continue
-                        cell = Cell(position=col_ref, value=value, parent=self)
-                        if cell_type:
-                            cell.data_type = cell_type
+                cell = self._cell_from_element(cell_elem, col_ref, ns)
+                if cell is None:
+                    cell_elem.clear()
+                    continue
 
                 # Применяем полный Style по xfId и сохраняем style_id
                 s_attr = cell_elem.get('s')
@@ -1191,21 +1186,205 @@ cdef class Worksheet:
     # Итерация по строкам и колонкам
     # ------------------------------------------------------------------
 
+    cdef void _materialize(self):
+        """Підвантажити лист із архіву (lazy → eager). Ідемпотентно."""
+        if self._preloaded or self._archive is None or self._sheet_path is None:
+            return
+        xml = self._archive.read(self._sheet_path)
+        if self._is_small_file:
+            self._parse_sheet_simple(xml)
+        else:
+            self._parse_sheet(xml)
+        self._recalculate_bounds()
+        self._preloaded = True
+
+    cdef str _col_letters(self, str ref):
+        """Літерна частина посилання: 'BC12' -> 'BC'."""
+        cdef int i = 0
+        while i < len(ref) and ref[i].isalpha():
+            i += 1
+        return ref[:i]
+
+    cdef object _peek_dimension_max_col(self):
+        """max_col з `<dimension ref>` листа, або None якщо елемента немає.
+
+        Читає лише голову потоку: `<dimension>` передує `<sheetData>`, тож
+        розпаковується кількасот байт, а не весь лист. Події 'start' —
+        принципово: на 'end' для `<sheetData>` довелося б розібрати весь лист.
+        """
+        cdef object stream, context, elem
+        cdef str ref, last
+        if self._archive is None or self._sheet_path is None:
+            return None
+        try:
+            stream = self._archive.open(self._sheet_path)
+        except (KeyError, OSError):
+            return None
+        try:
+            context = etree.iterparse(
+                stream, events=('start',),
+                tag=(_NS_MAIN + 'dimension', _NS_MAIN + 'sheetData'),
+            )
+            for _evt, elem in context:
+                if elem.tag == _NS_MAIN + 'sheetData':
+                    return None  # дійшли до даних — <dimension> не було
+                ref = elem.get('ref')
+                if not ref:
+                    return None
+                last = ref.split(':')[-1]
+                letters = self._col_letters(last)
+                if not letters:
+                    return None
+                return self._col_to_num(letters)
+        finally:
+            stream.close()
+        return None
+
+    def _stream_rows(self, min_row, max_row, min_col, max_col, bint values_only, bint fixed_width):
+        """Потоковий генератор рядків поверх `iterparse` (design D6.1–D6.3).
+
+        Пікова памʼять не залежить від кількості рядків: розібраний `<row>`
+        одразу очищується разом з попередніми сиблінгами. Позиція комірки
+        береться з її `r=`, а не з порядку `<c>`, тож розріджені рядки не
+        зʼїжджають. `fixed_width=False` означає, що ширина прийшла з
+        `<dimension>` і кортеж можна розширити, якщо `ref` виявиться брехливим.
+        """
+        row_tag = _NS_MAIN + 'row'
+        c_tag = _NS_MAIN + 'c'
+        v_tag = _NS_MAIN + 'v'
+        f_tag = _NS_MAIN + 'f'
+        is_tag = _NS_MAIN + 'is'
+        t_tag = _NS_MAIN + 't'
+
+        r_min = 1 if min_row is None else int(min_row)
+        r_max = None if max_row is None else int(max_row)
+        c_min = 1 if min_col is None else int(min_col)
+        c_max = int(max_col)
+        width = max(c_max - c_min + 1, 0)
+
+        stream = self._archive.open(self._sheet_path)
+        try:
+            context = etree.iterparse(stream, events=('end',), tag=row_tag)
+            expected = r_min
+            for _evt, row_elem in context:
+                r = int(row_elem.get('r') or expected)
+                if r_max is not None and r > r_max:
+                    break
+                if r >= r_min:
+                    # Пропущені у XML рядки — кортежі з None, як в openpyxl
+                    while expected < r:
+                        yield self._make_row(None, expected, c_min, width, values_only, fixed_width,
+                                             c_tag, v_tag, f_tag, is_tag, t_tag)
+                        expected += 1
+                    yield self._make_row(row_elem, r, c_min, width, values_only, fixed_width,
+                                         c_tag, v_tag, f_tag, is_tag, t_tag)
+                    expected = r + 1
+                # критично для сталої памʼяті: звільняємо розібране піддерево
+                row_elem.clear()
+                while row_elem.getprevious() is not None:
+                    del row_elem.getparent()[0]
+            # Явно заданий max_row добиваємо порожніми рядками (як bbox-шлях)
+            if r_max is not None:
+                while expected <= r_max:
+                    yield self._make_row(None, expected, c_min, width, values_only, fixed_width,
+                                         c_tag, v_tag, f_tag, is_tag, t_tag)
+                    expected += 1
+        finally:
+            stream.close()
+
+    def _make_row(self, row_elem, int r, int c_min, int width, bint values_only,
+                  bint fixed_width, str c_tag, str v_tag, str f_tag, str is_tag, str t_tag):
+        """Зібрати кортеж одного рядка; row_elem=None → рядок відсутній у XML."""
+        values = [None] * width
+        if row_elem is not None:
+            for c_el in row_elem:
+                if c_el.tag != c_tag:
+                    continue
+                ref = c_el.get('r')
+                if ref:
+                    col = self._col_to_num(self._col_letters(ref))
+                else:
+                    continue
+                idx = col - c_min
+                if idx < 0:
+                    continue
+                if idx >= len(values):
+                    if fixed_width:
+                        continue  # викликач явно обмежив діапазон — обрізаємо
+                    # <dimension ref> занизив межу: розширюємо, а не губимо дані
+                    values.extend([None] * (idx - len(values) + 1))
+                values[idx] = self._stream_cell_value(c_el, v_tag, f_tag, is_tag, t_tag)
+        if values_only:
+            return tuple(values)
+        return tuple(
+            self._make_stream_cell(c_min + i, r, values[i]) for i in range(len(values))
+        )
+
+    def _make_stream_cell(self, int col, int r, value):
+        """Cell на льоту для потокового читання — НЕ потрапляє в `_cells`."""
+        cell = Cell(position=f"{self._num_to_col(col)}{r}", value=value, parent=self)
+        if isinstance(value, str) and value.startswith('='):
+            cell.data_type = 'f'
+        return cell
+
+    def _stream_cell_value(self, c_el, str v_tag, str f_tag, str is_tag, str t_tag):
+        """Значення комірки з `<c>`; семантика — як у матеріалізуючих парсерах."""
+        t_attr = c_el.get('t')
+
+        # Формула має пріоритет над кешованим <v> — так само, як у
+        # _parse_sheet_simple/_standard/_chunked (сумісно з openpyxl без data_only)
+        f_el = c_el.find(f_tag)
+        if f_el is not None and f_el.text is not None:
+            return '=' + f_el.text
+
+        if t_attr == 'inlineStr':
+            is_el = c_el.find(is_tag)
+            if is_el is None:
+                return None
+            # itertext() — як у _cell_from_element: склеює rich-text runs, щоб
+            # потоковий і матеріалізуючий шляхи давали однакові значення
+            return ''.join(is_el.itertext())
+
+        v_el = c_el.find(v_tag)
+        if v_el is None or v_el.text is None:
+            return None
+        raw = v_el.text
+
+        if t_attr == 's':
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                return raw
+            if 0 <= idx < len(self._shared_strings):
+                return self._shared_strings[idx]
+            return raw
+        if t_attr == 'str':
+            return raw
+        return self._convert_cell_value_fast(raw)
+
     def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None, bint values_only=False):
         """Итерация по строкам, совместимая с openpyxl.
 
-        В lazy-режиме при первом вызове подгружает данные листа из архива.
+        У lazy/read-only режимі читає лист потоком зі сталою памʼяттю, не
+        матеріалізуючи `Cell` (D-10). У звичайному режимі віддає ТІ САМІ обʼєкти
+        `Cell`, що й `ws[coord]`, щоб запис через ітератор лишався видимим
+        (design D6.2). Якщо у листа немає `<dimension>` і викликач не задав
+        `max_col`, ширину кортежів визначити наперед неможливо — відкочуємось на
+        матеріалізацію, бо коректність важливіша за памʼять (design D6.4).
         """
-        # Ленивая подзагрузка для lazy=True
         if not self._preloaded and self._archive is not None and self._sheet_path is not None:
-            xml = self._archive.read(self._sheet_path)
-            if self._is_small_file:
-                self._parse_sheet_simple(xml)
-            else:
-                self._parse_sheet(xml)
-            self._recalculate_bounds()
-            self._preloaded = True
+            if max_col is not None:
+                return self._stream_rows(min_row, max_row, min_col, max_col, values_only, True)
+            dim_max_col = self._peek_dimension_max_col()
+            if dim_max_col is not None:
+                return self._stream_rows(min_row, max_row, min_col, dim_max_col, values_only, False)
+            self._materialize()
+        else:
+            self._materialize()
+        return self._iter_rows_materialized(min_row, max_row, min_col, max_col, values_only)
 
+    def _iter_rows_materialized(self, min_row, max_row, min_col, max_col, bint values_only):
+        """Поточна bbox-ітерація по матеріалізованому листу (identity збережено)."""
         cdef int r_min, r_max, c_min, c_max
         cdef int row, col
         cdef object cell
@@ -1225,16 +1404,10 @@ cdef class Worksheet:
     def iter_cols(self, min_col=1, max_col=None, min_row=1, max_row=None, bint values_only=False):
         """Итерация по колонкам, совместимая с openpyxl.
 
-        В lazy-режиме при первом вызове подгружает данные листа из архива.
+        Транспонування по колонках вимагає всіх рядків одночасно, тож сталої
+        памʼяті тут не буває за визначенням — лист матеріалізується.
         """
-        if not self._preloaded and self._archive is not None and self._sheet_path is not None:
-            xml = self._archive.read(self._sheet_path)
-            if self._is_small_file:
-                self._parse_sheet_simple(xml)
-            else:
-                self._parse_sheet(xml)
-            self._recalculate_bounds()
-            self._preloaded = True
+        self._materialize()
 
         cdef int r_min, r_max, c_min, c_max
         cdef int row, col
@@ -1403,15 +1576,34 @@ cdef class Worksheet:
     # Генерация XML sheetData (значення + mergeCells)
     # ------------------------------------------------------------------
 
+    cdef bytes _read_original_xml(self):
+        """Прочитати оригінальний XML листа з архіву на вимогу.
+
+        Свідомо НЕ кешуємо результат у полі: `Workbook.save` викликає
+        `get_xml_data()` для КОЖНОГО листа, тож кешування підняло б пік памʼяті
+        до суми всіх листів замість одного найбільшого. Викликач має відпустити
+        байти одразу після запису (design D7.2).
+        """
+        if self._archive is None or self._sheet_path is None:
+            return None
+        return self._archive.read(self._sheet_path)
+
     cpdef bytes get_xml_data(self):
         """Генерация XML содержимого листа + <row>/<col> для dimensions.
-        
+
         Если лист не был изменен и есть оригинальный XML - возвращаем его.
+        У lazy-режимі оригінал у памʼяті відсутній — дочитуємо з архіву.
         """
+        cdef bytes original
         # Если лист не изменялся и есть оригинальный XML - возвращаем его
-        if not self._modified and self._original_xml is not None:
-            return self._original_xml
-            
+        if not self._modified:
+            original = self._original_xml
+            if original is None:
+                original = self._read_original_xml()
+            if original is not None:
+                return original
+
+
         cdef dict rows_data = {}
         cdef str cell_position, column
         cdef int row, i
@@ -1425,6 +1617,7 @@ cdef class Worksheet:
         # Создаем список (row, col_num, cell_position) для правильной сортировки
         cdef list cell_sort_list = []
         cdef int col_num
+        cdef int max_col_num = 0
         for cell_position in self._cells.keys():
             i = 0
             while i < len(cell_position) and cell_position[i].isalpha():
@@ -1432,8 +1625,10 @@ cdef class Worksheet:
             column = cell_position[:i]
             row = int(cell_position[i:])
             col_num = self._col_to_num(column)
+            if col_num > max_col_num:
+                max_col_num = col_num
             cell_sort_list.append((row, col_num, cell_position))
-        
+
         # Сортируем по строке, затем по номеру колонки
         cell_sort_list.sort()
 
@@ -1529,8 +1724,19 @@ cdef class Worksheet:
         if cols_xml:
             cols_section = "\n    <cols>" + "".join(cols_xml) + "</cols>"
 
+        # <dimension> обовʼязковий для Excel і дає читачам ширину рядка без
+        # повного скану — саме на нього спирається потокове iter_rows, щоб
+        # добивати розріджені рядки до сталої ширини (design D6.3/D6.4).
+        # Якірна точка — завжди A1: ref-надмножина коректна для падінгу.
+        cdef str dimension_section = '\n    <dimension ref="A1"/>'
+        if cell_sort_list:
+            dimension_section = (
+                f'\n    <dimension ref="A1:'
+                f'{self._num_to_col(max_col_num)}{cell_sort_list[-1][0]}"/>'
+            )
+
         cdef str xml_content = f"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
-<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">{cols_section}
+<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">{dimension_section}{cols_section}
     <sheetData>
         {"".join(rows_xml)}
     </sheetData>{merged_cells_section}

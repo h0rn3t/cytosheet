@@ -29,13 +29,37 @@
 
 - [ ] 4.1 (D-7) `worksheet.pyx` парсери: `t="b"` → `bool`
 - [ ] 4.2 (D-8) Дати: `serial → datetime` за датовим `number_format` (системи 1900/1904); запис `datetime → serial` + формат
-- [ ] 4.3 (D-9) `inlineStr` обробляти у `_parse_sheet_standard` та `_parse_sheet_chunked`
+- [x] 4.3 (D-9) `inlineStr` обробляти у `_parse_sheet_standard` та `_parse_sheet_chunked` — спільний helper `_cell_from_element()` замість двох копій блоку вилучення значення (CS-7); `itertext()` склеює rich-text runs; `_stream_cell_value` вирівняно на ту саму семантику. Закриває `test_stream_no_dimension_falls_back` + `test_inlinestr_read_in_standard_parser`
 - [ ] 4.4 Значення-помилки `t="e"` зберігати з `data_type='e'`
 - [ ] 4.5 Тест `test_type_fidelity_roundtrip` (`bool`↔`bool`, `datetime`↔`datetime`, inlineStr ≥50 KB)
 
 ## 5. Фаза 3 — Памʼять і продуктивність
 
-- [ ] 5.1 (D-10) `iter_rows`/`iter_cols` у read-only: генератор поверх `iterparse` без матеріалізації Cell і без заповнення `_cells` порожніми координатами
+**Основа:** зовнішній патч `~/Downloads/cytosheet_stream_values_patch.pyx` (iterparse-ядро
+з `clear()` + видаленням попередніх сиблінгів) — перевірений емпірично, але на щільному
+файлі, тож розріджені входи в ньому зламані. Ядро беремо, форму — ні (див. design D6.1).
+
+**Ескалація scope (2026-07-17):** тести 5.1 засвітили два дефекти поза межами streaming,
+які його блокують: `ws['A1'].value = x` не позначає лист зміненим (D-3/D-4 крізь
+публічний C-атрибут → task 5.1.13, design D8) і `inlineStr` у standard-парсері
+(D-9 → task 4.3, design D9). Обидва втягнуто в цю зміну.
+
+- [ ] 5.1 (D-10) Справжній streaming read-only
+  - [x] 5.1.1 `worksheet.pyx:77`: читання `_original_xml` перевести під `_preload`; усунути подвійний `archive.read` (рядки 79 і 84 читають той самий entry)
+  - [x] 5.1.2 `get_xml_data`: ліниве читання `_original_xml` з архіву **без memoize в поле** (інакше пік = сума всіх листів, бо `workbook.pyx:675` кличе `get_xml_data` на кожному листі) — `_read_original_xml()`
+  - [x] 5.1.3 `workbook.pyx::save`/`save_virtual_workbook`: `ValueError`, якщо `_archive is None` після `close()` — прапорець `_closed` + `_check_open()` (лише для завантажених книг; нова книга без архіву зберігається як раніше)
+  - [x] 5.1.4 `<dimension>`: парсити `ref` під час `iterparse` (передує `<sheetData>`, вартість O(1)) для `max_col` — `_peek_dimension_max_col()` на подіях `start`
+  - [x] 5.1.5 `<dimension ref>` емітити в `get_xml_data` перед `<sheetData>` — зараз не пишемо взагалі, через що власні файли не стримляться
+  - [x] 5.1.6 `iter_rows`/`iter_cols`: гілка `not _preloaded` → `iterparse`-генератор; позиція комірки з `r=` (через наявний `_col_to_num`), падінг пропущених комірок і рядків до `None`; `values_only=False` створює Cell на льоту без запису в `_cells` — `_stream_rows`/`_make_row`/`_make_stream_cell`
+  - [x] 5.1.7 Фолбек на матеріалізуючий шлях, якщо `<dimension>` відсутній і `max_col` не передано — зелений після 5.1.9 + 4.3
+  - [x] 5.1.8 Eager-шлях недоторканий: `_preloaded=True` → поточна bbox-ітерація (identity комірок = семантика запису) — `_iter_rows_materialized`; зелений після 5.1.13
+  - [x] 5.1.9 `_is_small_file` рахується з `archive.getinfo(path).file_size` в обох режимах, до й поза `if _preload` — без читання entry (design D9)
+  - [ ] 5.1.10 (опційно) `stream_values()` як однорядковий аліас `return self.iter_rows(values_only=True)` — тільки якщо ім'я потрібне зовні
+  - [x] 5.1.11 Тести: `tests/test_streaming_readonly.py` — 10 з 10 зелені
+  - [x] 5.1.12 Бенчмарк сталої памʼяті: `test_stream_peak_memory_constant_in_rows` — пік RSS у окремому процесі (ru_maxrss монотонний, тож два заміри в одному процесі непридатні), фікстури зібрані сирим XML (openpyxl на 200k рядків сам стає вузьким місцем). **Результат: 25.5 → 26.8 MB за 20× даних (+5.2%)**. Фальсифікація: той самий обхід eager-шляхом дає 86.6 → 1292 MB (+1392%), тобто поріг 20% справді дискримінує; стримінг = 48× менше памʼяті на 200k рядків
+  - [x] 5.1.13 (D-3/D-4, design D8) `cell.pyx`: `value` → `@property` над полем `_value`; `set_value` — єдина реалізація запису (оновлює `data_type`, скидає `_shared_string_index=-1`, ставить `parent._modified=True`), сеттер делегує їй. Конструктор пише `self._value` напряму; парсери створюють Cell лише через конструктор, тож завантаження не позначає лист зміненим
+  - [x] 5.1.14 Тести до 5.1.13: `test_cell_value_attr_marks_modified`, `test_load_and_save_unmodified_is_byte_identical` (regression на ризик D8 — байтова звірка XML усіх листів), `test_inlinestr_read_in_standard_parser` (закриває 4.3)
+  - [x] 5.1.15 PERF-1 до/після 5.1.13: виміряно на `file_example_XLSX_5000.xlsx` (40 007 комірок, best-of-7): 31.8 ns/читання до → 31.4 ns після, просідання немає (`cdef public` і так дескриптор). Ризик із design D8 знято
 - [ ] 5.2 Write-only режим для запису дуже великих файлів (аналог openpyxl `WriteOnlyWorksheet`)
 - [ ] 5.3 Прибрати `print()`/`except Exception: pass` з парсерів (D-12): логування або контрольоване підняття
 - [ ] 5.4 Відтворюваний бенчмарк-набір (час + RSS) vs openpyxl/xlsxwriter на матриці розмірів/щільності; автоматизація
