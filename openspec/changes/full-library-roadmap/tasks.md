@@ -27,11 +27,12 @@
 
 ## 4. Фаза 2 — Вірність типів даних
 
-- [ ] 4.1 (D-7) `worksheet.pyx` парсери: `t="b"` → `bool`
-- [ ] 4.2 (D-8) Дати: `serial → datetime` за датовим `number_format` (системи 1900/1904); запис `datetime → serial` + формат
+- [x] 4.1 (D-7) `worksheet.pyx` парсери: `t="b"` → `bool` — через спільну `_value_from_t()`, яку використовують усі три парсери + потоковий шлях (диспетчеризація за `t=` була розповзлась по трьох копіях)
+- [x] 4.2 (D-8) Дати: `serial → datetime` за датовим `number_format` (`_is_date_format`/`_from_excel`/`_to_excel` дзеркалять openpyxl, включно з міфічним 1900-02-29); `date1904` читається з `<workbookPr>` і передається в лист; запис `datetime → serial`, формат ставить `Cell.set_value` (`_ensure_date_format`). Заразом заповнено `BUILTIN_NUMFMTS` до повної таблиці ECMA-376 — без id 21 (`h:mm:ss`) час від openpyxl читався числом
 - [x] 4.3 (D-9) `inlineStr` обробляти у `_parse_sheet_standard` та `_parse_sheet_chunked` — спільний helper `_cell_from_element()` замість двох копій блоку вилучення значення (CS-7); `itertext()` склеює rich-text runs; `_stream_cell_value` вирівняно на ту саму семантику. Закриває `test_stream_no_dimension_falls_back` + `test_inlinestr_read_in_standard_parser`
-- [ ] 4.4 Значення-помилки `t="e"` зберігати з `data_type='e'`
-- [ ] 4.5 Тест `test_type_fidelity_roundtrip` (`bool`↔`bool`, `datetime`↔`datetime`, inlineStr ≥50 KB)
+- [x] 4.4 Значення-помилки `t="e"` зберігати з `data_type='e'` — гілка в `_value_from_t`; значення й `data_type` збігаються з openpyxl
+- [x] 4.5 Тести — `tests/test_type_fidelity.py` (11 кейсів): bool, дати (параметризовано, з межею serial<60), час з builtin-формату, `t="e"`, XML-сутності; усі звірені з openpyxl як ground truth
+- [x] 4.6 (поза початковим планом) Простий парсер не знімав XML-сутності: `'a & b < c'` читався як `'a &amp; b &lt; c'`, кирилиця — як `&#1090;...`. Тиха порча даних на дефолтному шляху малих файлів (COMPAT-1). Фікс: `html.unescape` на трьох місцях вилучення підрядка (lxml-шляхи декодують самі, тож їх НЕ чіпаємо). Знайдено крос-тестом 4.5
 
 ## 5. Фаза 3 — Памʼять і продуктивність
 

@@ -1,3 +1,9 @@
+import datetime as _dt
+
+# Формат, який Excel/openpyxl ставлять комірці, куди записали дату без формату
+cdef str _DEFAULT_DATE_FORMAT = 'yyyy-mm-dd h:mm:ss'
+
+
 cdef class Cell:
     cdef str position
     cdef object _value  # читати/писати як cell.value (property нижче)
@@ -56,9 +62,12 @@ cdef class Cell:
         # Простая эвристика: если это строка, начинающаяся с '=', считаем формулой
         if isinstance(value, str) and value.startswith('='):
             self.data_type = 'f'
-        else:
-            # type inference для других случаев можно доработать позже
-            pass
+        elif isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+            self.data_type = 'd'
+            # Дата в XLSX — це число; без датового number_format вона прочиталась
+            # би назад як float. Excel/openpyxl так само проставляють формат самі,
+            # але лише якщо його ще не задано явно.
+            self._ensure_date_format()
         # Без цього зміна через `ws['A1'].value = x` губилась би при save:
         # get_xml_data віддав би оригінальний XML (D-3).
         if self.parent is not None:
@@ -81,6 +90,22 @@ cdef class Cell:
     @value.setter
     def value(self, object v):
         self.set_value(v)
+
+    cdef void _ensure_date_format(self):
+        """Проставити датовий number_format, якщо комірка його ще не має.
+
+        Явно заданий формат не чіпаємо: користувач міг захотіти 'd.m.yyyy' або
+        показати дату числом.
+        """
+        cdef object fmt
+        if self.style is None:
+            from .styles import Style
+            self.style = Style()
+        fmt = self.style.numberFormat
+        if fmt is None or fmt == 'General':
+            self.style.numberFormat = _DEFAULT_DATE_FORMAT
+            # xf комірки застарів — хай серіалізатор перебудує його під новий формат
+            self._style_id = -1
 
     cpdef object get_value(self):
         """Быстрый доступ к значению"""

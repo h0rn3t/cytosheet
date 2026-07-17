@@ -63,16 +63,47 @@ cdef str STYLES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalon
     <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>"""
 
+# Вбудовані формати ECMA-376 (ті самі коди, що в openpyxl.styles.numbers).
+# Таблиця має бути ПОВНОЮ: неповна означає number_format=None для файлів, які
+# посилаються на пропущений id — а для дат/часу це ще й втрата типу, бо саме
+# формат відрізняє дату від числа (напр. id 21 'h:mm:ss' у файлах openpyxl).
 cdef dict BUILTIN_NUMFMTS = {
     0: 'General',
     1: '0',
     2: '0.00',
     3: '#,##0',
     4: '#,##0.00',
+    5: '"$"#,##0_);("$"#,##0)',
+    6: '"$"#,##0_);[Red]("$"#,##0)',
+    7: '"$"#,##0.00_);("$"#,##0.00)',
+    8: '"$"#,##0.00_);[Red]("$"#,##0.00)',
     9: '0%',
     10: '0.00%',
-    14: 'm/d/yy',
+    11: '0.00E+00',
+    12: '# ?/?',
+    13: '# ??/??',
+    14: 'mm-dd-yy',
+    15: 'd-mmm-yy',
+    16: 'd-mmm',
+    17: 'mmm-yy',
+    18: 'h:mm AM/PM',
+    19: 'h:mm:ss AM/PM',
+    20: 'h:mm',
+    21: 'h:mm:ss',
     22: 'm/d/yy h:mm',
+    37: '#,##0_);(#,##0)',
+    38: '#,##0_);[Red](#,##0)',
+    39: '#,##0.00_);(#,##0.00)',
+    40: '#,##0.00_);[Red](#,##0.00)',
+    41: '_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)',
+    42: '_("$"* #,##0_);_("$"* \\(#,##0\\);_("$"* "-"_);_(@_)',
+    43: '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)',
+    44: '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)',
+    45: 'mm:ss',
+    46: '[h]:mm:ss',
+    47: 'mmss.0',
+    48: '##0.0E+0',
+    49: '@',
 }
 
 cdef class Workbook:
@@ -171,10 +202,17 @@ cdef class Workbook:
         cdef str R_NS = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
         cdef bint used_rels = False
         cdef set available
+        cdef bint date1904 = False
+        cdef object pr_elem
 
         if self._original_workbook_xml is not None:
             try:
                 root = etree.fromstring(self._original_workbook_xml)
+                # Система дат книги: 1904 трапляється у файлах зі старих Mac-Excel.
+                # Без неї serial->datetime зсувався б рівно на 1462 дні.
+                pr_elem = root.find(MAIN_NS + 'workbookPr')
+                if pr_elem is not None and pr_elem.get('date1904') in ('1', 'true'):
+                    date1904 = True
                 sheets_elem = root.find(MAIN_NS + 'sheets')
                 if sheets_elem is not None:
                     for sheet_elem in sheets_elem.findall(MAIN_NS + 'sheet'):
@@ -216,6 +254,7 @@ cdef class Workbook:
                 ws = Worksheet(
                     self._shared_strings, title, self._archive, full_path,
                     not lazy, xf_style_map=self._xf_style_map,
+                    date1904=date1904,
                 )
                 self._sheets[title] = ws
                 used_rels = True
@@ -231,6 +270,7 @@ cdef class Workbook:
                 ws = Worksheet(
                     self._shared_strings, name, self._archive, sheet_path,
                     not lazy, xf_style_map=self._xf_style_map,
+                    date1904=date1904,
                 )
                 self._sheets[name] = ws
 

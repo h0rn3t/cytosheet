@@ -1,11 +1,73 @@
 from lxml import etree
 import io
+import datetime as _dt
+import re
+from html import unescape as _unescape_xml
 from collections.abc import MutableMapping
 
 from .cell import Cell
 
 # Namespace SpreadsheetML — у Clark-нотації lxml
 cdef str _NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+
+# Епохи Excel (ті самі, що в openpyxl.utils.datetime):
+# 1900-система рахує від 1899-12-30, бо Excel вважає 1900 високосним і має
+# неіснуючий 1900-02-29 (serial 60) — зсув компенсує саме цю ваду.
+# 1904-система (старі Mac-файли) цієї вади не має.
+cdef object _WINDOWS_EPOCH = _dt.datetime(1899, 12, 30)
+cdef object _MAC_EPOCH = _dt.datetime(1904, 1, 1)
+
+# Формат, який Excel/openpyxl ставлять комірці, куди записали datetime без формату
+cdef str _DEFAULT_DATETIME_FORMAT = 'yyyy-mm-dd h:mm:ss'
+
+# Літерали коду формату, які НЕ несуть типу: "текст", [Red]/[$-409], \-екранування.
+# Знімаємо їх перед пошуком токенів, інакше `0.00 "days"` чи `[$-409]0` хибно
+# вважались би датою через 'd'/'s'.
+_FMT_LITERALS = re.compile(r'"[^"]*"|\[[^\]]*\]|\\.')
+_DATE_TOKENS = re.compile(r'[ymdhs]')
+
+
+cdef bint _is_date_format(str fmt):
+    """Чи є код числового формату датовим (семантика openpyxl.styles.is_date_format)."""
+    if fmt is None:
+        return False
+    if fmt == 'General' or fmt == '@':
+        return False
+    # Лише перша секція: у 'positive;negative;zero' решта на тип не впливає
+    return _DATE_TOKENS.search(_FMT_LITERALS.sub('', fmt.split(';')[0]).lower()) is not None
+
+
+cdef object _from_excel(object serial, bint date1904):
+    """Excel serial -> datetime/time. Дзеркалить openpyxl.utils.datetime.from_excel."""
+    cdef object epoch = _MAC_EPOCH if date1904 else _WINDOWS_EPOCH
+    day, fraction = divmod(float(serial), 1)
+    diff = _dt.timedelta(milliseconds=round(fraction * 86400000))
+    if 0 <= serial < 1 and diff.days == 0:
+        # Дробова частина без дня — це час доби; openpyxl віддає datetime.time
+        return (_dt.datetime.min + diff).time()
+    if 0 < serial < 60 and not date1904:
+        # До міфічного 1900-02-29 серійні номери зсунуті на день
+        day += 1
+    return epoch + _dt.timedelta(days=day) + diff
+
+
+cdef object _to_excel(object value, bint date1904):
+    """datetime/date/time -> Excel serial. Зворотна до _from_excel."""
+    cdef object epoch = _MAC_EPOCH if date1904 else _WINDOWS_EPOCH
+    cdef object dt
+    cdef double day_fraction
+    if isinstance(value, _dt.time):
+        return (value.hour * 3600 + value.minute * 60 + value.second
+                + value.microsecond / 1e6) / 86400.0
+    if isinstance(value, _dt.datetime):
+        dt = value
+    else:  # datetime.date
+        dt = _dt.datetime(value.year, value.month, value.day)
+    delta = dt - epoch
+    day_fraction = (delta.seconds + delta.microseconds / 1e6) / 86400.0
+    if 0 < delta.days < 60 and not date1904:
+        return delta.days - 1 + day_fraction
+    return delta.days + day_fraction
 
 
 cdef class RowDimension:
@@ -40,6 +102,7 @@ cdef class Worksheet:
     cdef public str _sheet_path
     cdef public bint _preloaded
     cdef public bint _is_small_file
+    cdef public bint _date1904  # 1904-система дат книги (з <workbookPr date1904="1"/>)
     cdef public list _merged_cells  # List[str]
     cdef public dict _xf_style_map  # xfId -> Style (повні стилі з styles.xml)
     cdef public dict _row_dimensions   # int -> RowDimension (внутреннее хранилище)
@@ -56,9 +119,11 @@ cdef class Worksheet:
             object archive = None,
             str _sheet_path = None,
             bint _preload = True,
-            dict xf_style_map = None
+            dict xf_style_map = None,
+            bint date1904 = False
     ):
         self.title = title
+        self._date1904 = date1904
         self._shared_strings = shared_strings if shared_strings is not None else []
         self._cells = {}
         self._archive = archive
@@ -149,24 +214,38 @@ cdef class Worksheet:
                 return st.copy()
         return None
 
-    cdef bint _apply_style_simple(self, object cell, str xml_str, int cell_start, int cell_end):
-        """Парсить s="..." у діапазоні [cell_start,cell_end), проставляє cell._style_id
-        і повний Style. Повертає True, якщо атрибут s= знайдено (для string-парсера)."""
+    cdef str _find_s_attr(self, str xml_str, int cell_start, int cell_end):
+        """Значення атрибута s= у діапазоні [cell_start,cell_end) або None.
+
+        Окремо від _apply_style_simple, бо xfId потрібен ДО створення Cell:
+        за ним визначається, чи число насправді дата (_maybe_date), а міняти
+        значення після створення можна лише через set_value — який позначив би
+        лист зміненим ще під час парсингу.
+        """
         cdef int s_start = xml_str.find('s="', cell_start, cell_end)
-        cdef int s_end, style_idx
-        cdef object st
+        cdef int s_end
         if s_start == -1:
+            return None
+        s_start += 3
+        s_end = xml_str.find('"', s_start, cell_end)
+        if s_end == -1:
+            return None
+        return xml_str[s_start:s_end]
+
+    cdef bint _apply_style_simple(self, object cell, str xml_str, int cell_start, int cell_end):
+        """Проставляє cell._style_id і повний Style за s=.
+        Повертає True, якщо атрибут s= знайдено (для string-парсера)."""
+        cdef str s_attr = self._find_s_attr(xml_str, cell_start, cell_end)
+        cdef int style_idx
+        cdef object st
+        if s_attr is None:
             # Немає s= → комірка успадковує дефолтний стиль книги (xf=0), як openpyxl
             st = self._style_for_xf(0)
             if st is not None:
                 cell.style = st
             return False
-        s_start += 3
-        s_end = xml_str.find('"', s_start, cell_end)
-        if s_end == -1:
-            return False
         try:
-            style_idx = int(xml_str[s_start:s_end])
+            style_idx = int(s_attr)
         except ValueError:
             return False
         cell._style_id = style_idx
@@ -446,7 +525,7 @@ cdef class Worksheet:
                 f_start += 3
                 f_end = xml_str.find('</f>', f_start, cell_end)
                 if f_end != -1:
-                    formula_text = xml_str[f_start:f_end]
+                    formula_text = _unescape_xml(xml_str[f_start:f_end])
                     value = '=' + formula_text
                     cell = Cell(position=cell_ref, value=value, parent=self)
                     cell.data_type = 'f'
@@ -464,7 +543,11 @@ cdef class Worksheet:
                         t2_start += 3
                         t2_end = xml_str.find('</t>', t2_start, cell_end)
                         if t2_end != -1:
-                            raw_value = xml_str[t2_start:t2_end]
+                            # Простий парсер ріже сирий підрядок, тож XML-сутності
+                            # треба зняти самим: інакше 'a & b' повертався б як
+                            # 'a &amp; b', а кирилиця — як '&#1090;...' (lxml-шляхи
+                            # декодують самі, тому там цього робити НЕ можна)
+                            raw_value = _unescape_xml(xml_str[t2_start:t2_end])
                             value = raw_value
                             cell = Cell(position=cell_ref, value=value, parent=self)
                             self._apply_style_simple(cell, xml_str, cell_start, cell_end)
@@ -484,7 +567,7 @@ cdef class Worksheet:
             if v_end == -1:
                 start_pos = cell_end + 4
                 continue
-            raw_value = xml_str[v_start:v_end]
+            raw_value = _unescape_xml(xml_str[v_start:v_end])
 
             if cell_type == 's':
                 try:
@@ -502,9 +585,12 @@ cdef class Worksheet:
                     value = raw_value
                     cell = Cell(position=cell_ref, value=value, parent=self)
             else:
-                value = self._convert_cell_value_fast(raw_value)
+                value = self._value_from_t(cell_type, raw_value)
+                value = self._maybe_date(value, self._find_s_attr(xml_str, cell_start, cell_end))
                 cell = Cell(position=cell_ref, value=value, parent=self)
-                if cell_type:
+                if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+                    cell.data_type = 'd'
+                elif cell_type:
                     cell.data_type = cell_type
 
             # Сохраняем ячейку если есть значение ИЛИ стиль
@@ -814,11 +900,14 @@ cdef class Worksheet:
                 return cell
             return Cell(position=col_ref, value=raw, parent=self)
 
-        value = self._convert_cell_value_fast(raw)
+        value = self._value_from_t(cell_type, raw)
         if value is None:
             return None
+        value = self._maybe_date(value, cell_elem.get('s'))
         cell = Cell(position=col_ref, value=value, parent=self)
-        if cell_type:
+        if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+            cell.data_type = 'd'
+        elif cell_type:
             cell.data_type = cell_type
         return cell
 
@@ -992,6 +1081,49 @@ cdef class Worksheet:
         except ValueError:
             return raw
 
+    cdef object _maybe_date(self, object value, str s_attr):
+        """Число -> datetime, якщо xf комірки має датовий number_format (D-8).
+
+        У XLSX дата — це звичайне число; датою її робить ВИКЛЮЧНО формат, тож
+        без цієї перевірки дати читались би як float (те саме робить openpyxl).
+        """
+        cdef int xf_id
+        cdef object style
+        if s_attr is None or not isinstance(value, (int, float)) or isinstance(value, bool):
+            return value
+        try:
+            xf_id = int(s_attr)
+        except (TypeError, ValueError):
+            return value
+        style = self._style_for_xf(xf_id)
+        if style is None or not _is_date_format(style.numberFormat):
+            return value
+        try:
+            return _from_excel(value, self._date1904)
+        except (ValueError, OverflowError):
+            # Серійний номер поза діапазоном дат — лишаємо числом, як openpyxl
+            return value
+
+    cdef object _value_from_t(self, str t_attr, str raw):
+        """`<v>`-значення за типом `t=` комірки. Спільна для всіх парсерів.
+
+        Єдина точка розбору типів: simple/standard/chunked і потоковий шлях
+        зобовʼязані давати однакове значення на однаковому XML. `t="s"` тут
+        НЕ обробляється — викликачі роблять це самі, бо їм потрібен ще й індекс
+        sharedString для зворотної серіалізації.
+        """
+        if t_attr == 'b':
+            # t="b" зберігається як 0/1; без цієї гілки int(raw) віддавав би
+            # 1/0 замість True/False і тип не відновлювався б (D-7)
+            return raw not in ('0', 'false', 'FALSE', 'False')
+        if t_attr == 'str':
+            return raw
+        if t_attr == 'e':
+            # Значення-помилка (#DIV/0!, #N/A ...) — лишається рядком, як в
+            # openpyxl; тип несе data_type='e' (D-11 у CLAUDE.md §10 — 4.4)
+            return raw
+        return self._convert_cell_value_fast(raw)
+
     # ------------------------------------------------------------------
     # Доступ і запис ячеек
     # ------------------------------------------------------------------
@@ -1016,23 +1148,16 @@ cdef class Worksheet:
         return cell
 
     def __setitem__(self, str key, object value):
-        cdef object cell
-        if key not in self._cells:
-            cell = Cell(position=key, value=value, parent=self)
-            # простая эвристика для формул
-            if isinstance(value, str) and value.startswith('='):
-                cell.data_type = 'f'
+        cdef object cell = self._cells.get(key)
+        if cell is None:
+            # Створюємо ПОРОЖНЮ комірку і пишемо через set_value: уся type
+            # inference (формули, дати) живе там в однині, тож шляхи "нова
+            # комірка" й "наявна комірка" не розходяться. Раніше нова комірка
+            # отримувала значення через конструктор і губила висновок типу —
+            # через це, зокрема, datetime не діставав number_format.
+            cell = Cell(position=key, parent=self)
             self._cells[key] = cell
-        else:
-            cell = self._cells[key]
-            # используем set_value, чтобы централизованно обновлять data_type
-            if hasattr(cell, 'set_value'):
-                cell.set_value(value)
-            else:
-                cell.value = value
-                cell._shared_string_index = -1
-                if isinstance(value, str) and value.startswith('='):
-                    cell.data_type = 'f'
+        cell.set_value(value)
 
         self._update_bounds_for_cell(key)
         # Присвоєння через індексатор змінює лист — інакше save завантаженої
@@ -1060,12 +1185,7 @@ cdef class Worksheet:
             self._cells[coord] = cell
 
         if value is not None:
-            if hasattr(cell, 'set_value'):
-                cell.set_value(value)
-            else:
-                cell.value = value
-                if isinstance(value, str) and value.startswith('='):
-                    cell.data_type = 'f'
+            cell.set_value(value)
             # Помечаем лист как измененный
             self._modified = True
 
@@ -1358,9 +1478,9 @@ cdef class Worksheet:
             if 0 <= idx < len(self._shared_strings):
                 return self._shared_strings[idx]
             return raw
-        if t_attr == 'str':
-            return raw
-        return self._convert_cell_value_fast(raw)
+        # _maybe_date і тут: потоковий шлях має давати ті самі значення, що й
+        # матеріалізуючий, інакше read_only=True мовчки віддавав би числа
+        return self._maybe_date(self._value_from_t(t_attr, raw), c_el.get('s'))
 
     def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None, bint values_only=False):
         """Итерация по строкам, совместимая с openpyxl.
@@ -1670,6 +1790,10 @@ cdef class Worksheet:
                 # иначе openpyxl пытается парсить "True"/"False" как число и падает.
                 if isinstance(cell_value, bool):
                     tag = f'<c r="{cell_position}" t="b"{style_attr}><v>{"1" if cell_value else "0"}</v></c>'
+                elif isinstance(cell_value, (_dt.datetime, _dt.date, _dt.time)):
+                    # У XLSX дата — число; датою її робить number_format комірки,
+                    # який проставляється у Cell.set_value (D-8)
+                    tag = f'<c r="{cell_position}"{style_attr}><v>{_to_excel(cell_value, self._date1904)}</v></c>'
                 elif isinstance(cell_value, str) and cell_value.startswith('='):
                     tag = f'<c r="{cell_position}"{style_attr}><f>{cell_value[1:]}</f></c>'
                 else:
