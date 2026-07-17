@@ -87,6 +87,54 @@ def test_atko_styles_xml_table_identical_after_modify(tmp_path):
     assert saved == original
 
 
+def test_cell_value_attr_marks_modified(tmp_path):
+    """Scenario: Зміна через атрибут `cell.value` на завантаженій книзі зберігається.
+
+    D-3/D-4 крізь `ws['A1'].value = x` — найпоширенішу openpyxl-ідіому. Поки
+    `value` був публічним C-атрибутом, присвоєння минало `set_value`, тож лист не
+    позначався зміненим, а `_shared_string_index` лишався на старому рядку.
+    """
+    wb = load_workbook(FIXTURE)
+    ws = wb.active
+    original = ws['A1'].value
+    assert original and original != 'ЗМІНЕНО ЧЕРЕЗ .value'
+
+    ws['A1'].value = 'ЗМІНЕНО ЧЕРЕЗ .value'
+    assert ws._modified is True, 'присвоєння cell.value не позначило лист зміненим'
+    assert ws['A1']._shared_string_index == -1, 'комірка досі посилається на старий sharedString'
+
+    out = tmp_path / 'atko_value_attr.xlsx'
+    wb.save(str(out))
+
+    assert oxl_load(str(out)).active['A1'].value == 'ЗМІНЕНО ЧЕРЕЗ .value'
+
+
+def test_load_and_save_unmodified_is_byte_identical(tmp_path):
+    """Scenario: Відкрити й зберегти без змін не переписує XML листа.
+
+    Regression-guard під ризик рішення D8: значення `value` тепер іде через
+    сеттер, який позначає лист зміненим. Якби конструктор `Cell` чи парсери
+    писали значення через нього, кожен завантажений лист ставав би `_modified`
+    ще при розборі — і `save` перегенерував би XML усіх листів (COMPAT-2).
+    """
+    wb = load_workbook(FIXTURE)
+    sheet_names = list(wb.sheetnames)
+    assert sheet_names, 'фікстура без листів — тест нічого не доводить'
+
+    # Сам факт завантаження (з розбором комірок) не є модифікацією
+    for name in sheet_names:
+        assert wb[name]._modified is False, f'лист {name} позначено зміненим при завантаженні'
+
+    out = tmp_path / 'atko_untouched.xlsx'
+    wb.save(str(out))
+
+    with zipfile.ZipFile(FIXTURE) as zin, zipfile.ZipFile(str(out)) as zout:
+        sheet_parts = [n for n in zin.namelist() if n.startswith('xl/worksheets/') and n.endswith('.xml')]
+        assert sheet_parts, 'у фікстурі не знайдено XML листів'
+        for part in sheet_parts:
+            assert zout.read(part) == zin.read(part), f'{part} перезаписано без жодної мутації'
+
+
 def test_atko_modify_persists_and_keeps_other_styles(tmp_path):
     """D-3/D-4: зміни застосовуються при save, а стилі нечіпаних комірок збережені."""
     wb = load_workbook(FIXTURE)

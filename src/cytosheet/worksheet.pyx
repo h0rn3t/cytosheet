@@ -1,8 +1,73 @@
 from lxml import etree
 import io
+import datetime as _dt
+import re
+from html import unescape as _unescape_xml
 from collections.abc import MutableMapping
 
 from .cell import Cell
+
+# Namespace SpreadsheetML — у Clark-нотації lxml
+cdef str _NS_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+
+# Епохи Excel (ті самі, що в openpyxl.utils.datetime):
+# 1900-система рахує від 1899-12-30, бо Excel вважає 1900 високосним і має
+# неіснуючий 1900-02-29 (serial 60) — зсув компенсує саме цю ваду.
+# 1904-система (старі Mac-файли) цієї вади не має.
+cdef object _WINDOWS_EPOCH = _dt.datetime(1899, 12, 30)
+cdef object _MAC_EPOCH = _dt.datetime(1904, 1, 1)
+
+# Формат, який Excel/openpyxl ставлять комірці, куди записали datetime без формату
+cdef str _DEFAULT_DATETIME_FORMAT = 'yyyy-mm-dd h:mm:ss'
+
+# Літерали коду формату, які НЕ несуть типу: "текст", [Red]/[$-409], \-екранування.
+# Знімаємо їх перед пошуком токенів, інакше `0.00 "days"` чи `[$-409]0` хибно
+# вважались би датою через 'd'/'s'.
+_FMT_LITERALS = re.compile(r'"[^"]*"|\[[^\]]*\]|\\.')
+_DATE_TOKENS = re.compile(r'[ymdhs]')
+
+
+cdef bint _is_date_format(str fmt):
+    """Чи є код числового формату датовим (семантика openpyxl.styles.is_date_format)."""
+    if fmt is None:
+        return False
+    if fmt == 'General' or fmt == '@':
+        return False
+    # Лише перша секція: у 'positive;negative;zero' решта на тип не впливає
+    return _DATE_TOKENS.search(_FMT_LITERALS.sub('', fmt.split(';')[0]).lower()) is not None
+
+
+cdef object _from_excel(object serial, bint date1904):
+    """Excel serial -> datetime/time. Дзеркалить openpyxl.utils.datetime.from_excel."""
+    cdef object epoch = _MAC_EPOCH if date1904 else _WINDOWS_EPOCH
+    day, fraction = divmod(float(serial), 1)
+    diff = _dt.timedelta(milliseconds=round(fraction * 86400000))
+    if 0 <= serial < 1 and diff.days == 0:
+        # Дробова частина без дня — це час доби; openpyxl віддає datetime.time
+        return (_dt.datetime.min + diff).time()
+    if 0 < serial < 60 and not date1904:
+        # До міфічного 1900-02-29 серійні номери зсунуті на день
+        day += 1
+    return epoch + _dt.timedelta(days=day) + diff
+
+
+cdef object _to_excel(object value, bint date1904):
+    """datetime/date/time -> Excel serial. Зворотна до _from_excel."""
+    cdef object epoch = _MAC_EPOCH if date1904 else _WINDOWS_EPOCH
+    cdef object dt
+    cdef double day_fraction
+    if isinstance(value, _dt.time):
+        return (value.hour * 3600 + value.minute * 60 + value.second
+                + value.microsecond / 1e6) / 86400.0
+    if isinstance(value, _dt.datetime):
+        dt = value
+    else:  # datetime.date
+        dt = _dt.datetime(value.year, value.month, value.day)
+    delta = dt - epoch
+    day_fraction = (delta.seconds + delta.microseconds / 1e6) / 86400.0
+    if 0 < delta.days < 60 and not date1904:
+        return delta.days - 1 + day_fraction
+    return delta.days + day_fraction
 
 
 cdef class RowDimension:
@@ -37,6 +102,7 @@ cdef class Worksheet:
     cdef public str _sheet_path
     cdef public bint _preloaded
     cdef public bint _is_small_file
+    cdef public bint _date1904  # 1904-система дат книги (з <workbookPr date1904="1"/>)
     cdef public list _merged_cells  # List[str]
     cdef public dict _xf_style_map  # xfId -> Style (повні стилі з styles.xml)
     cdef public dict _row_dimensions   # int -> RowDimension (внутреннее хранилище)
@@ -53,9 +119,11 @@ cdef class Worksheet:
             object archive = None,
             str _sheet_path = None,
             bint _preload = True,
-            dict xf_style_map = None
+            dict xf_style_map = None,
+            bint date1904 = False
     ):
         self.title = title
+        self._date1904 = date1904
         self._shared_strings = shared_strings if shared_strings is not None else []
         self._cells = {}
         self._archive = archive
@@ -73,17 +141,23 @@ cdef class Worksheet:
         self._original_xml = None
         self._modified = False
         
-        # Если загружаем из архива - сохраняем оригинальный XML
-        if self._archive is not None and self._sheet_path is not None:
+        # Розмір листа беремо з ZIP-каталогу (file_size = розпакований розмір),
+        # а не з len(прочитаного XML): у lazy читати entry заради вибору
+        # стратегії означало б матеріалізувати лист. Рахуємо в обох режимах,
+        # інакше lazy-фолбек у _materialize завжди брав би _parse_sheet.
+        if archive is not None and _sheet_path is not None:
             try:
-                self._original_xml = self._archive.read(self._sheet_path)
-            except Exception:
-                pass
+                self._is_small_file = archive.getinfo(_sheet_path).file_size < 50000  # ~500 строк
+            except KeyError:
+                self._is_small_file = False
 
+        # XML листа читаємо з архіву РІВНО ОДИН РАЗ і тільки в eager-режимі.
+        # У lazy-режимі не читаємо взагалі: для ітерації потрібен потік
+        # (див. iter_rows), а для save оригінал дочитується на вимогу в
+        # get_xml_data. Інакше lazy тримав би O(розмір листа) ще до розбору.
         if archive is not None and _preload and _sheet_path is not None:
             xml = archive.read(_sheet_path)
-            xml_size = len(xml)
-            self._is_small_file = xml_size < 50000  # ~500 строк
+            self._original_xml = xml
             if self._is_small_file:
                 self._parse_sheet_simple(xml)
             else:
@@ -140,24 +214,38 @@ cdef class Worksheet:
                 return st.copy()
         return None
 
-    cdef bint _apply_style_simple(self, object cell, str xml_str, int cell_start, int cell_end):
-        """Парсить s="..." у діапазоні [cell_start,cell_end), проставляє cell._style_id
-        і повний Style. Повертає True, якщо атрибут s= знайдено (для string-парсера)."""
+    cdef str _find_s_attr(self, str xml_str, int cell_start, int cell_end):
+        """Значення атрибута s= у діапазоні [cell_start,cell_end) або None.
+
+        Окремо від _apply_style_simple, бо xfId потрібен ДО створення Cell:
+        за ним визначається, чи число насправді дата (_maybe_date), а міняти
+        значення після створення можна лише через set_value — який позначив би
+        лист зміненим ще під час парсингу.
+        """
         cdef int s_start = xml_str.find('s="', cell_start, cell_end)
-        cdef int s_end, style_idx
-        cdef object st
+        cdef int s_end
         if s_start == -1:
+            return None
+        s_start += 3
+        s_end = xml_str.find('"', s_start, cell_end)
+        if s_end == -1:
+            return None
+        return xml_str[s_start:s_end]
+
+    cdef bint _apply_style_simple(self, object cell, str xml_str, int cell_start, int cell_end):
+        """Проставляє cell._style_id і повний Style за s=.
+        Повертає True, якщо атрибут s= знайдено (для string-парсера)."""
+        cdef str s_attr = self._find_s_attr(xml_str, cell_start, cell_end)
+        cdef int style_idx
+        cdef object st
+        if s_attr is None:
             # Немає s= → комірка успадковує дефолтний стиль книги (xf=0), як openpyxl
             st = self._style_for_xf(0)
             if st is not None:
                 cell.style = st
             return False
-        s_start += 3
-        s_end = xml_str.find('"', s_start, cell_end)
-        if s_end == -1:
-            return False
         try:
-            style_idx = int(xml_str[s_start:s_end])
+            style_idx = int(s_attr)
         except ValueError:
             return False
         cell._style_id = style_idx
@@ -437,7 +525,7 @@ cdef class Worksheet:
                 f_start += 3
                 f_end = xml_str.find('</f>', f_start, cell_end)
                 if f_end != -1:
-                    formula_text = xml_str[f_start:f_end]
+                    formula_text = _unescape_xml(xml_str[f_start:f_end])
                     value = '=' + formula_text
                     cell = Cell(position=cell_ref, value=value, parent=self)
                     cell.data_type = 'f'
@@ -455,7 +543,11 @@ cdef class Worksheet:
                         t2_start += 3
                         t2_end = xml_str.find('</t>', t2_start, cell_end)
                         if t2_end != -1:
-                            raw_value = xml_str[t2_start:t2_end]
+                            # Простий парсер ріже сирий підрядок, тож XML-сутності
+                            # треба зняти самим: інакше 'a & b' повертався б як
+                            # 'a &amp; b', а кирилиця — як '&#1090;...' (lxml-шляхи
+                            # декодують самі, тому там цього робити НЕ можна)
+                            raw_value = _unescape_xml(xml_str[t2_start:t2_end])
                             value = raw_value
                             cell = Cell(position=cell_ref, value=value, parent=self)
                             self._apply_style_simple(cell, xml_str, cell_start, cell_end)
@@ -475,7 +567,7 @@ cdef class Worksheet:
             if v_end == -1:
                 start_pos = cell_end + 4
                 continue
-            raw_value = xml_str[v_start:v_end]
+            raw_value = _unescape_xml(xml_str[v_start:v_end])
 
             if cell_type == 's':
                 try:
@@ -493,9 +585,12 @@ cdef class Worksheet:
                     value = raw_value
                     cell = Cell(position=cell_ref, value=value, parent=self)
             else:
-                value = self._convert_cell_value_fast(raw_value)
+                value = self._value_from_t(cell_type, raw_value)
+                value = self._maybe_date(value, self._find_s_attr(xml_str, cell_start, cell_end))
                 cell = Cell(position=cell_ref, value=value, parent=self)
-                if cell_type:
+                if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+                    cell.data_type = 'd'
+                elif cell_type:
                     cell.data_type = cell_type
 
             # Сохраняем ячейку если есть значение ИЛИ стиль
@@ -725,47 +820,10 @@ cdef class Worksheet:
                     cell_elem.clear()
                     continue
 
-                # Формула
-                f_elem = cell_elem.find('main:f', namespaces=ns)
-                if f_elem is not None and f_elem.text is not None:
-                    value = '=' + f_elem.text
-                    cell = Cell(position=col_ref, value=value, parent=self)
-                    cell.data_type = 'f'
-                else:
-                    cell_type = cell_elem.get('t')
-                    v_elem = cell_elem.find('main:v', namespaces=ns)
-                    if v_elem is None:
-                        cell_elem.clear()
-                        continue
-
-                    raw = v_elem.text
-                    if raw is None:
-                        cell_elem.clear()
-                        continue
-
-                    if cell_type == 's':
-                        try:
-                            shared_string_index = int(raw)
-                            if 0 <= shared_string_index < len(self._shared_strings):
-                                value = self._shared_strings[shared_string_index]
-                                # Создаем ячейку и сохраняем индекс
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                                cell._shared_string_index = shared_string_index
-                                cell.data_type = 's'
-                            else:
-                                value = raw
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                        except (ValueError, TypeError):
-                            value = raw
-                            cell = Cell(position=col_ref, value=value, parent=self)
-                    else:
-                        value = self._convert_cell_value_fast(raw)
-                        if value is None:
-                            cell_elem.clear()
-                            continue
-                        cell = Cell(position=col_ref, value=value, parent=self)
-                        if cell_type:
-                            cell.data_type = cell_type
+                cell = self._cell_from_element(cell_elem, col_ref, ns)
+                if cell is None:
+                    cell_elem.clear()
+                    continue
 
                 # Применяем полный Style по xfId и сохраняем style_id
                 s_attr = cell_elem.get('s')
@@ -790,6 +848,68 @@ cdef class Worksheet:
             print(f"Ошибка стандартного парсинга: {e}")
         finally:
             self._cells.update(temp_cells)
+
+    cdef object _cell_from_element(self, object cell_elem, str col_ref, dict ns):
+        """`Cell` з елемента `<c>` для standard/chunked парсерів; `None` → пропустити.
+
+        Спільна для обох парсерів свідомо: раніше кожен мав власну копію цього
+        блоку, і `inlineStr` випав з обох (D-9), тоді як simple-парсер його вмів.
+        Одне джерело правди тут дешевше за синхронізацію трьох (CS-7).
+        """
+        cdef str cell_type, raw
+        cdef object f_elem, v_elem, is_elem, cell, value
+        cdef int shared_string_index
+
+        # Формула має пріоритет над кешованим <v> (сумісно з openpyxl без data_only)
+        f_elem = cell_elem.find('main:f', namespaces=ns)
+        if f_elem is not None and f_elem.text is not None:
+            cell = Cell(position=col_ref, value='=' + f_elem.text, parent=self)
+            cell.data_type = 'f'
+            return cell
+
+        cell_type = cell_elem.get('t')
+
+        # inlineStr: <c t="inlineStr"><is><t>Text</t></is></c> — БЕЗ <v>.
+        # openpyxl пише саме так за замовчуванням, тож без цієї гілки будь-який
+        # великий openpyxl-файл читався стовпцями None (D-9).
+        if cell_type == 'inlineStr':
+            is_elem = cell_elem.find('main:is', namespaces=ns)
+            if is_elem is None:
+                return None
+            # itertext() замість find('main:t'): склеює rich-text runs (<r><t>..)
+            cell = Cell(position=col_ref, value=''.join(is_elem.itertext()), parent=self)
+            cell.data_type = 's'
+            return cell
+
+        v_elem = cell_elem.find('main:v', namespaces=ns)
+        if v_elem is None or v_elem.text is None:
+            return None
+        raw = v_elem.text
+
+        if cell_type == 's':
+            try:
+                shared_string_index = int(raw)
+            except (ValueError, TypeError):
+                return Cell(position=col_ref, value=raw, parent=self)
+            if 0 <= shared_string_index < len(self._shared_strings):
+                cell = Cell(position=col_ref, value=self._shared_strings[shared_string_index], parent=self)
+                # Індекс лишаємо: незмінена комірка серіалізується назад тим самим
+                # sharedString (скидається при зміні значення — D-4)
+                cell._shared_string_index = shared_string_index
+                cell.data_type = 's'
+                return cell
+            return Cell(position=col_ref, value=raw, parent=self)
+
+        value = self._value_from_t(cell_type, raw)
+        if value is None:
+            return None
+        value = self._maybe_date(value, cell_elem.get('s'))
+        cell = Cell(position=col_ref, value=value, parent=self)
+        if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+            cell.data_type = 'd'
+        elif cell_type:
+            cell.data_type = cell_type
+        return cell
 
     cdef void _parse_sheet_chunked(self, bytes xml_data):
         """Чанковый парсер для больших файлов с поддержкой <f>."""
@@ -908,46 +1028,10 @@ cdef class Worksheet:
                     cell_elem.clear()
                     continue
 
-                # Формула
-                f_elem = cell_elem.find('main:f', namespaces=ns)
-                if f_elem is not None and f_elem.text is not None:
-                    value = '=' + f_elem.text
-                    cell = Cell(position=col_ref, value=value, parent=self)
-                    cell.data_type = 'f'
-                else:
-                    cell_type = cell_elem.get('t')
-                    v_elem = cell_elem.find('main:v', namespaces=ns)
-                    if v_elem is None:
-                        cell_elem.clear()
-                        continue
-
-                    raw = v_elem.text
-                    if raw is None:
-                        cell_elem.clear()
-                        continue
-
-                    if cell_type == 's':
-                        try:
-                            shared_string_index = int(raw)
-                            if 0 <= shared_string_index < len(self._shared_strings):
-                                value = self._shared_strings[shared_string_index]
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                                cell._shared_string_index = shared_string_index
-                                cell.data_type = 's'
-                            else:
-                                value = raw
-                                cell = Cell(position=col_ref, value=value, parent=self)
-                        except (ValueError, TypeError):
-                            value = raw
-                            cell = Cell(position=col_ref, value=value, parent=self)
-                    else:
-                        value = self._convert_cell_value_fast(raw)
-                        if value is None:
-                            cell_elem.clear()
-                            continue
-                        cell = Cell(position=col_ref, value=value, parent=self)
-                        if cell_type:
-                            cell.data_type = cell_type
+                cell = self._cell_from_element(cell_elem, col_ref, ns)
+                if cell is None:
+                    cell_elem.clear()
+                    continue
 
                 # Применяем полный Style по xfId и сохраняем style_id
                 s_attr = cell_elem.get('s')
@@ -997,6 +1081,49 @@ cdef class Worksheet:
         except ValueError:
             return raw
 
+    cdef object _maybe_date(self, object value, str s_attr):
+        """Число -> datetime, якщо xf комірки має датовий number_format (D-8).
+
+        У XLSX дата — це звичайне число; датою її робить ВИКЛЮЧНО формат, тож
+        без цієї перевірки дати читались би як float (те саме робить openpyxl).
+        """
+        cdef int xf_id
+        cdef object style
+        if s_attr is None or not isinstance(value, (int, float)) or isinstance(value, bool):
+            return value
+        try:
+            xf_id = int(s_attr)
+        except (TypeError, ValueError):
+            return value
+        style = self._style_for_xf(xf_id)
+        if style is None or not _is_date_format(style.numberFormat):
+            return value
+        try:
+            return _from_excel(value, self._date1904)
+        except (ValueError, OverflowError):
+            # Серійний номер поза діапазоном дат — лишаємо числом, як openpyxl
+            return value
+
+    cdef object _value_from_t(self, str t_attr, str raw):
+        """`<v>`-значення за типом `t=` комірки. Спільна для всіх парсерів.
+
+        Єдина точка розбору типів: simple/standard/chunked і потоковий шлях
+        зобовʼязані давати однакове значення на однаковому XML. `t="s"` тут
+        НЕ обробляється — викликачі роблять це самі, бо їм потрібен ще й індекс
+        sharedString для зворотної серіалізації.
+        """
+        if t_attr == 'b':
+            # t="b" зберігається як 0/1; без цієї гілки int(raw) віддавав би
+            # 1/0 замість True/False і тип не відновлювався б (D-7)
+            return raw not in ('0', 'false', 'FALSE', 'False')
+        if t_attr == 'str':
+            return raw
+        if t_attr == 'e':
+            # Значення-помилка (#DIV/0!, #N/A ...) — лишається рядком, як в
+            # openpyxl; тип несе data_type='e' (D-11 у CLAUDE.md §10 — 4.4)
+            return raw
+        return self._convert_cell_value_fast(raw)
+
     # ------------------------------------------------------------------
     # Доступ і запис ячеек
     # ------------------------------------------------------------------
@@ -1021,23 +1148,16 @@ cdef class Worksheet:
         return cell
 
     def __setitem__(self, str key, object value):
-        cdef object cell
-        if key not in self._cells:
-            cell = Cell(position=key, value=value, parent=self)
-            # простая эвристика для формул
-            if isinstance(value, str) and value.startswith('='):
-                cell.data_type = 'f'
+        cdef object cell = self._cells.get(key)
+        if cell is None:
+            # Створюємо ПОРОЖНЮ комірку і пишемо через set_value: уся type
+            # inference (формули, дати) живе там в однині, тож шляхи "нова
+            # комірка" й "наявна комірка" не розходяться. Раніше нова комірка
+            # отримувала значення через конструктор і губила висновок типу —
+            # через це, зокрема, datetime не діставав number_format.
+            cell = Cell(position=key, parent=self)
             self._cells[key] = cell
-        else:
-            cell = self._cells[key]
-            # используем set_value, чтобы централизованно обновлять data_type
-            if hasattr(cell, 'set_value'):
-                cell.set_value(value)
-            else:
-                cell.value = value
-                cell._shared_string_index = -1
-                if isinstance(value, str) and value.startswith('='):
-                    cell.data_type = 'f'
+        cell.set_value(value)
 
         self._update_bounds_for_cell(key)
         # Присвоєння через індексатор змінює лист — інакше save завантаженої
@@ -1065,12 +1185,7 @@ cdef class Worksheet:
             self._cells[coord] = cell
 
         if value is not None:
-            if hasattr(cell, 'set_value'):
-                cell.set_value(value)
-            else:
-                cell.value = value
-                if isinstance(value, str) and value.startswith('='):
-                    cell.data_type = 'f'
+            cell.set_value(value)
             # Помечаем лист как измененный
             self._modified = True
 
@@ -1191,21 +1306,205 @@ cdef class Worksheet:
     # Итерация по строкам и колонкам
     # ------------------------------------------------------------------
 
+    cdef void _materialize(self):
+        """Підвантажити лист із архіву (lazy → eager). Ідемпотентно."""
+        if self._preloaded or self._archive is None or self._sheet_path is None:
+            return
+        xml = self._archive.read(self._sheet_path)
+        if self._is_small_file:
+            self._parse_sheet_simple(xml)
+        else:
+            self._parse_sheet(xml)
+        self._recalculate_bounds()
+        self._preloaded = True
+
+    cdef str _col_letters(self, str ref):
+        """Літерна частина посилання: 'BC12' -> 'BC'."""
+        cdef int i = 0
+        while i < len(ref) and ref[i].isalpha():
+            i += 1
+        return ref[:i]
+
+    cdef object _peek_dimension_max_col(self):
+        """max_col з `<dimension ref>` листа, або None якщо елемента немає.
+
+        Читає лише голову потоку: `<dimension>` передує `<sheetData>`, тож
+        розпаковується кількасот байт, а не весь лист. Події 'start' —
+        принципово: на 'end' для `<sheetData>` довелося б розібрати весь лист.
+        """
+        cdef object stream, context, elem
+        cdef str ref, last
+        if self._archive is None or self._sheet_path is None:
+            return None
+        try:
+            stream = self._archive.open(self._sheet_path)
+        except (KeyError, OSError):
+            return None
+        try:
+            context = etree.iterparse(
+                stream, events=('start',),
+                tag=(_NS_MAIN + 'dimension', _NS_MAIN + 'sheetData'),
+            )
+            for _evt, elem in context:
+                if elem.tag == _NS_MAIN + 'sheetData':
+                    return None  # дійшли до даних — <dimension> не було
+                ref = elem.get('ref')
+                if not ref:
+                    return None
+                last = ref.split(':')[-1]
+                letters = self._col_letters(last)
+                if not letters:
+                    return None
+                return self._col_to_num(letters)
+        finally:
+            stream.close()
+        return None
+
+    def _stream_rows(self, min_row, max_row, min_col, max_col, bint values_only, bint fixed_width):
+        """Потоковий генератор рядків поверх `iterparse` (design D6.1–D6.3).
+
+        Пікова памʼять не залежить від кількості рядків: розібраний `<row>`
+        одразу очищується разом з попередніми сиблінгами. Позиція комірки
+        береться з її `r=`, а не з порядку `<c>`, тож розріджені рядки не
+        зʼїжджають. `fixed_width=False` означає, що ширина прийшла з
+        `<dimension>` і кортеж можна розширити, якщо `ref` виявиться брехливим.
+        """
+        row_tag = _NS_MAIN + 'row'
+        c_tag = _NS_MAIN + 'c'
+        v_tag = _NS_MAIN + 'v'
+        f_tag = _NS_MAIN + 'f'
+        is_tag = _NS_MAIN + 'is'
+        t_tag = _NS_MAIN + 't'
+
+        r_min = 1 if min_row is None else int(min_row)
+        r_max = None if max_row is None else int(max_row)
+        c_min = 1 if min_col is None else int(min_col)
+        c_max = int(max_col)
+        width = max(c_max - c_min + 1, 0)
+
+        stream = self._archive.open(self._sheet_path)
+        try:
+            context = etree.iterparse(stream, events=('end',), tag=row_tag)
+            expected = r_min
+            for _evt, row_elem in context:
+                r = int(row_elem.get('r') or expected)
+                if r_max is not None and r > r_max:
+                    break
+                if r >= r_min:
+                    # Пропущені у XML рядки — кортежі з None, як в openpyxl
+                    while expected < r:
+                        yield self._make_row(None, expected, c_min, width, values_only, fixed_width,
+                                             c_tag, v_tag, f_tag, is_tag, t_tag)
+                        expected += 1
+                    yield self._make_row(row_elem, r, c_min, width, values_only, fixed_width,
+                                         c_tag, v_tag, f_tag, is_tag, t_tag)
+                    expected = r + 1
+                # критично для сталої памʼяті: звільняємо розібране піддерево
+                row_elem.clear()
+                while row_elem.getprevious() is not None:
+                    del row_elem.getparent()[0]
+            # Явно заданий max_row добиваємо порожніми рядками (як bbox-шлях)
+            if r_max is not None:
+                while expected <= r_max:
+                    yield self._make_row(None, expected, c_min, width, values_only, fixed_width,
+                                         c_tag, v_tag, f_tag, is_tag, t_tag)
+                    expected += 1
+        finally:
+            stream.close()
+
+    def _make_row(self, row_elem, int r, int c_min, int width, bint values_only,
+                  bint fixed_width, str c_tag, str v_tag, str f_tag, str is_tag, str t_tag):
+        """Зібрати кортеж одного рядка; row_elem=None → рядок відсутній у XML."""
+        values = [None] * width
+        if row_elem is not None:
+            for c_el in row_elem:
+                if c_el.tag != c_tag:
+                    continue
+                ref = c_el.get('r')
+                if ref:
+                    col = self._col_to_num(self._col_letters(ref))
+                else:
+                    continue
+                idx = col - c_min
+                if idx < 0:
+                    continue
+                if idx >= len(values):
+                    if fixed_width:
+                        continue  # викликач явно обмежив діапазон — обрізаємо
+                    # <dimension ref> занизив межу: розширюємо, а не губимо дані
+                    values.extend([None] * (idx - len(values) + 1))
+                values[idx] = self._stream_cell_value(c_el, v_tag, f_tag, is_tag, t_tag)
+        if values_only:
+            return tuple(values)
+        return tuple(
+            self._make_stream_cell(c_min + i, r, values[i]) for i in range(len(values))
+        )
+
+    def _make_stream_cell(self, int col, int r, value):
+        """Cell на льоту для потокового читання — НЕ потрапляє в `_cells`."""
+        cell = Cell(position=f"{self._num_to_col(col)}{r}", value=value, parent=self)
+        if isinstance(value, str) and value.startswith('='):
+            cell.data_type = 'f'
+        return cell
+
+    def _stream_cell_value(self, c_el, str v_tag, str f_tag, str is_tag, str t_tag):
+        """Значення комірки з `<c>`; семантика — як у матеріалізуючих парсерах."""
+        t_attr = c_el.get('t')
+
+        # Формула має пріоритет над кешованим <v> — так само, як у
+        # _parse_sheet_simple/_standard/_chunked (сумісно з openpyxl без data_only)
+        f_el = c_el.find(f_tag)
+        if f_el is not None and f_el.text is not None:
+            return '=' + f_el.text
+
+        if t_attr == 'inlineStr':
+            is_el = c_el.find(is_tag)
+            if is_el is None:
+                return None
+            # itertext() — як у _cell_from_element: склеює rich-text runs, щоб
+            # потоковий і матеріалізуючий шляхи давали однакові значення
+            return ''.join(is_el.itertext())
+
+        v_el = c_el.find(v_tag)
+        if v_el is None or v_el.text is None:
+            return None
+        raw = v_el.text
+
+        if t_attr == 's':
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                return raw
+            if 0 <= idx < len(self._shared_strings):
+                return self._shared_strings[idx]
+            return raw
+        # _maybe_date і тут: потоковий шлях має давати ті самі значення, що й
+        # матеріалізуючий, інакше read_only=True мовчки віддавав би числа
+        return self._maybe_date(self._value_from_t(t_attr, raw), c_el.get('s'))
+
     def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None, bint values_only=False):
         """Итерация по строкам, совместимая с openpyxl.
 
-        В lazy-режиме при первом вызове подгружает данные листа из архива.
+        У lazy/read-only режимі читає лист потоком зі сталою памʼяттю, не
+        матеріалізуючи `Cell` (D-10). У звичайному режимі віддає ТІ САМІ обʼєкти
+        `Cell`, що й `ws[coord]`, щоб запис через ітератор лишався видимим
+        (design D6.2). Якщо у листа немає `<dimension>` і викликач не задав
+        `max_col`, ширину кортежів визначити наперед неможливо — відкочуємось на
+        матеріалізацію, бо коректність важливіша за памʼять (design D6.4).
         """
-        # Ленивая подзагрузка для lazy=True
         if not self._preloaded and self._archive is not None and self._sheet_path is not None:
-            xml = self._archive.read(self._sheet_path)
-            if self._is_small_file:
-                self._parse_sheet_simple(xml)
-            else:
-                self._parse_sheet(xml)
-            self._recalculate_bounds()
-            self._preloaded = True
+            if max_col is not None:
+                return self._stream_rows(min_row, max_row, min_col, max_col, values_only, True)
+            dim_max_col = self._peek_dimension_max_col()
+            if dim_max_col is not None:
+                return self._stream_rows(min_row, max_row, min_col, dim_max_col, values_only, False)
+            self._materialize()
+        else:
+            self._materialize()
+        return self._iter_rows_materialized(min_row, max_row, min_col, max_col, values_only)
 
+    def _iter_rows_materialized(self, min_row, max_row, min_col, max_col, bint values_only):
+        """Поточна bbox-ітерація по матеріалізованому листу (identity збережено)."""
         cdef int r_min, r_max, c_min, c_max
         cdef int row, col
         cdef object cell
@@ -1225,16 +1524,10 @@ cdef class Worksheet:
     def iter_cols(self, min_col=1, max_col=None, min_row=1, max_row=None, bint values_only=False):
         """Итерация по колонкам, совместимая с openpyxl.
 
-        В lazy-режиме при первом вызове подгружает данные листа из архива.
+        Транспонування по колонках вимагає всіх рядків одночасно, тож сталої
+        памʼяті тут не буває за визначенням — лист матеріалізується.
         """
-        if not self._preloaded and self._archive is not None and self._sheet_path is not None:
-            xml = self._archive.read(self._sheet_path)
-            if self._is_small_file:
-                self._parse_sheet_simple(xml)
-            else:
-                self._parse_sheet(xml)
-            self._recalculate_bounds()
-            self._preloaded = True
+        self._materialize()
 
         cdef int r_min, r_max, c_min, c_max
         cdef int row, col
@@ -1403,15 +1696,34 @@ cdef class Worksheet:
     # Генерация XML sheetData (значення + mergeCells)
     # ------------------------------------------------------------------
 
+    cdef bytes _read_original_xml(self):
+        """Прочитати оригінальний XML листа з архіву на вимогу.
+
+        Свідомо НЕ кешуємо результат у полі: `Workbook.save` викликає
+        `get_xml_data()` для КОЖНОГО листа, тож кешування підняло б пік памʼяті
+        до суми всіх листів замість одного найбільшого. Викликач має відпустити
+        байти одразу після запису (design D7.2).
+        """
+        if self._archive is None or self._sheet_path is None:
+            return None
+        return self._archive.read(self._sheet_path)
+
     cpdef bytes get_xml_data(self):
         """Генерация XML содержимого листа + <row>/<col> для dimensions.
-        
+
         Если лист не был изменен и есть оригинальный XML - возвращаем его.
+        У lazy-режимі оригінал у памʼяті відсутній — дочитуємо з архіву.
         """
+        cdef bytes original
         # Если лист не изменялся и есть оригинальный XML - возвращаем его
-        if not self._modified and self._original_xml is not None:
-            return self._original_xml
-            
+        if not self._modified:
+            original = self._original_xml
+            if original is None:
+                original = self._read_original_xml()
+            if original is not None:
+                return original
+
+
         cdef dict rows_data = {}
         cdef str cell_position, column
         cdef int row, i
@@ -1425,6 +1737,7 @@ cdef class Worksheet:
         # Создаем список (row, col_num, cell_position) для правильной сортировки
         cdef list cell_sort_list = []
         cdef int col_num
+        cdef int max_col_num = 0
         for cell_position in self._cells.keys():
             i = 0
             while i < len(cell_position) and cell_position[i].isalpha():
@@ -1432,8 +1745,10 @@ cdef class Worksheet:
             column = cell_position[:i]
             row = int(cell_position[i:])
             col_num = self._col_to_num(column)
+            if col_num > max_col_num:
+                max_col_num = col_num
             cell_sort_list.append((row, col_num, cell_position))
-        
+
         # Сортируем по строке, затем по номеру колонки
         cell_sort_list.sort()
 
@@ -1475,6 +1790,10 @@ cdef class Worksheet:
                 # иначе openpyxl пытается парсить "True"/"False" как число и падает.
                 if isinstance(cell_value, bool):
                     tag = f'<c r="{cell_position}" t="b"{style_attr}><v>{"1" if cell_value else "0"}</v></c>'
+                elif isinstance(cell_value, (_dt.datetime, _dt.date, _dt.time)):
+                    # У XLSX дата — число; датою її робить number_format комірки,
+                    # який проставляється у Cell.set_value (D-8)
+                    tag = f'<c r="{cell_position}"{style_attr}><v>{_to_excel(cell_value, self._date1904)}</v></c>'
                 elif isinstance(cell_value, str) and cell_value.startswith('='):
                     tag = f'<c r="{cell_position}"{style_attr}><f>{cell_value[1:]}</f></c>'
                 else:
@@ -1529,8 +1848,19 @@ cdef class Worksheet:
         if cols_xml:
             cols_section = "\n    <cols>" + "".join(cols_xml) + "</cols>"
 
+        # <dimension> обовʼязковий для Excel і дає читачам ширину рядка без
+        # повного скану — саме на нього спирається потокове iter_rows, щоб
+        # добивати розріджені рядки до сталої ширини (design D6.3/D6.4).
+        # Якірна точка — завжди A1: ref-надмножина коректна для падінгу.
+        cdef str dimension_section = '\n    <dimension ref="A1"/>'
+        if cell_sort_list:
+            dimension_section = (
+                f'\n    <dimension ref="A1:'
+                f'{self._num_to_col(max_col_num)}{cell_sort_list[-1][0]}"/>'
+            )
+
         cdef str xml_content = f"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
-<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">{cols_section}
+<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">{dimension_section}{cols_section}
     <sheetData>
         {"".join(rows_xml)}
     </sheetData>{merged_cells_section}

@@ -1,6 +1,12 @@
+import datetime as _dt
+
+# Формат, який Excel/openpyxl ставлять комірці, куди записали дату без формату
+cdef str _DEFAULT_DATE_FORMAT = 'yyyy-mm-dd h:mm:ss'
+
+
 cdef class Cell:
     cdef str position
-    cdef public object value
+    cdef object _value  # читати/писати як cell.value (property нижче)
     cdef public object style
     cdef public object parent
     cdef public bint is_merged_cell
@@ -11,7 +17,11 @@ cdef class Cell:
 
     def __init__(self, str position=None, object value=None, object style=None, object parent=None):
         self.position = position if position is not None else ""
-        self.value = value
+        # ВАЖЛИВО: пишемо _value напряму, повз сеттер. Парсери створюють Cell саме
+        # так, і якби конструктор ішов через set_value, кожен завантажений лист
+        # ставав би _modified=True ще під час розбору — і save перегенеровував би
+        # XML усіх листів, знищивши байтову точність незмінених (COMPAT-2).
+        self._value = value
         self.parent = parent
         self.is_merged_cell = False
         self.merged_range = None
@@ -31,29 +41,75 @@ cdef class Cell:
             return f"<MergedCell position={self.position}, merged_range={self.merged_range}>"
         # Показываем data_type для отладки, если он задан
         if self.data_type is not None:
-            return f"<Cell position={self.position}, value={self.value}, data_type={self.data_type}>"
-        return f"<Cell position={self.position}, value={self.value}>"
+            return f"<Cell position={self.position}, value={self._value}, data_type={self.data_type}>"
+        return f"<Cell position={self.position}, value={self._value}>"
 
     cpdef str get_position(self):
         """Быстрый доступ к позиции ячейки"""
         return self.position
 
     cpdef void set_value(self, object value):
-        """Быстрая установка значения с обновлением типа данных для формул."""
-        self.value = value
+        """Встановити значення: тип даних, скидання sharedString, позначка змін.
+
+        Єдина точка запису значення — сюди веде і `cell.value = x` (property
+        нижче), і `ws[coord] = x`. Викликається ПІСЛЯ завантаження, тому позначає
+        лист зміненим; парсери значення сюди не пишуть (див. `__init__`).
+        """
+        self._value = value
         # Значення змінено вручну — комірка більше НЕ посилається на вихідний
         # sharedString, інакше серіалізатор повторно віддав би старий індекс (D-4).
         self._shared_string_index = -1
         # Простая эвристика: если это строка, начинающаяся с '=', считаем формулой
         if isinstance(value, str) and value.startswith('='):
             self.data_type = 'f'
-        else:
-            # type inference для других случаев можно доработать позже
-            pass
+        elif isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+            self.data_type = 'd'
+            # Дата в XLSX — це число; без датового number_format вона прочиталась
+            # би назад як float. Excel/openpyxl так само проставляють формат самі,
+            # але лише якщо його ще не задано явно.
+            self._ensure_date_format()
+        # Без цього зміна через `ws['A1'].value = x` губилась би при save:
+        # get_xml_data віддав би оригінальний XML (D-3).
+        if self.parent is not None:
+            try:
+                self.parent._modified = True
+            except Exception:
+                pass
+
+    @property
+    def value(self):
+        """Значення комірки (openpyxl-сумісне).
+
+        Property, а не C-атрибут, свідомо: `ws['A1'].value = x` — найпоширеніша
+        openpyxl-ідіома, і поки `value` був простим атрибутом, вона проходила повз
+        `set_value`/`__setitem__`, тож зміна не позначала лист зміненим і не
+        скидала sharedString-індекс — тобто мовчки губилась при save (D-3/D-4).
+        """
+        return self._value
+
+    @value.setter
+    def value(self, object v):
+        self.set_value(v)
+
+    cdef void _ensure_date_format(self):
+        """Проставити датовий number_format, якщо комірка його ще не має.
+
+        Явно заданий формат не чіпаємо: користувач міг захотіти 'd.m.yyyy' або
+        показати дату числом.
+        """
+        cdef object fmt
+        if self.style is None:
+            from .styles import Style
+            self.style = Style()
+        fmt = self.style.numberFormat
+        if fmt is None or fmt == 'General':
+            self.style.numberFormat = _DEFAULT_DATE_FORMAT
+            # xf комірки застарів — хай серіалізатор перебудує його під новий формат
+            self._style_id = -1
 
     cpdef object get_value(self):
         """Быстрый доступ к значению"""
-        return self.value
+        return self._value
 
     cpdef void set_style(self, object style):
         """Быстрая установка стиля"""

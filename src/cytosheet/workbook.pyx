@@ -63,16 +63,47 @@ cdef str STYLES_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalon
     <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>"""
 
+# Вбудовані формати ECMA-376 (ті самі коди, що в openpyxl.styles.numbers).
+# Таблиця має бути ПОВНОЮ: неповна означає number_format=None для файлів, які
+# посилаються на пропущений id — а для дат/часу це ще й втрата типу, бо саме
+# формат відрізняє дату від числа (напр. id 21 'h:mm:ss' у файлах openpyxl).
 cdef dict BUILTIN_NUMFMTS = {
     0: 'General',
     1: '0',
     2: '0.00',
     3: '#,##0',
     4: '#,##0.00',
+    5: '"$"#,##0_);("$"#,##0)',
+    6: '"$"#,##0_);[Red]("$"#,##0)',
+    7: '"$"#,##0.00_);("$"#,##0.00)',
+    8: '"$"#,##0.00_);[Red]("$"#,##0.00)',
     9: '0%',
     10: '0.00%',
-    14: 'm/d/yy',
+    11: '0.00E+00',
+    12: '# ?/?',
+    13: '# ??/??',
+    14: 'mm-dd-yy',
+    15: 'd-mmm-yy',
+    16: 'd-mmm',
+    17: 'mmm-yy',
+    18: 'h:mm AM/PM',
+    19: 'h:mm:ss AM/PM',
+    20: 'h:mm',
+    21: 'h:mm:ss',
     22: 'm/d/yy h:mm',
+    37: '#,##0_);(#,##0)',
+    38: '#,##0_);[Red](#,##0)',
+    39: '#,##0.00_);(#,##0.00)',
+    40: '#,##0.00_);[Red](#,##0.00)',
+    41: '_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)',
+    42: '_("$"* #,##0_);_("$"* \\(#,##0\\);_("$"* "-"_);_(@_)',
+    43: '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)',
+    44: '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)',
+    45: 'mm:ss',
+    46: '[h]:mm:ss',
+    47: 'mmss.0',
+    48: '##0.0E+0',
+    49: '@',
 }
 
 cdef class Workbook:
@@ -81,6 +112,7 @@ cdef class Workbook:
     cdef public int _active_sheet_index
     cdef public bint _lazy
     cdef public object _archive  # ZipFile | None
+    cdef public bint _closed  # книга була завантажена з архіву і архів закрито
     cdef dict _xf_style_map        # map xfId -> повний Style (при чтении styles.xml)
     cdef bytes _original_styles_xml  # оригинальный styles.xml из загруженного файла
     cdef bytes _original_shared_strings_xml  # оригинальный sharedStrings.xml
@@ -98,6 +130,7 @@ cdef class Workbook:
         self._active_sheet_index = 0
         self._archive = _archive
         self._lazy = lazy
+        self._closed = False
         self._xf_style_map = {}
         self._original_styles_xml = None
         self._original_shared_strings_xml = None
@@ -169,10 +202,17 @@ cdef class Workbook:
         cdef str R_NS = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
         cdef bint used_rels = False
         cdef set available
+        cdef bint date1904 = False
+        cdef object pr_elem
 
         if self._original_workbook_xml is not None:
             try:
                 root = etree.fromstring(self._original_workbook_xml)
+                # Система дат книги: 1904 трапляється у файлах зі старих Mac-Excel.
+                # Без неї serial->datetime зсувався б рівно на 1462 дні.
+                pr_elem = root.find(MAIN_NS + 'workbookPr')
+                if pr_elem is not None and pr_elem.get('date1904') in ('1', 'true'):
+                    date1904 = True
                 sheets_elem = root.find(MAIN_NS + 'sheets')
                 if sheets_elem is not None:
                     for sheet_elem in sheets_elem.findall(MAIN_NS + 'sheet'):
@@ -214,6 +254,7 @@ cdef class Workbook:
                 ws = Worksheet(
                     self._shared_strings, title, self._archive, full_path,
                     not lazy, xf_style_map=self._xf_style_map,
+                    date1904=date1904,
                 )
                 self._sheets[title] = ws
                 used_rels = True
@@ -229,6 +270,7 @@ cdef class Workbook:
                 ws = Worksheet(
                     self._shared_strings, name, self._archive, sheet_path,
                     not lazy, xf_style_map=self._xf_style_map,
+                    date1904=date1904,
                 )
                 self._sheets[name] = ws
 
@@ -586,6 +628,8 @@ cdef class Workbook:
         cdef int i
         cdef object sheet
 
+        self._check_open()
+
         with ZipFile(buffer, 'w', compression=ZIP_DEFLATED) as zip_file:
             zip_file.writestr("xl/workbook.xml", self._get_workbook_xml())
             zip_file.writestr("[Content_Types].xml", self._get_content_types_xml())
@@ -621,7 +665,9 @@ cdef class Workbook:
         cdef bytes data
         cdef str dir_path
         cdef object sheet
-        
+
+        self._check_open()
+
         # Поддержка file-like объектов (BytesIO, StringIO и т.д.)
         is_file_like = hasattr(file_path, 'write')
         
@@ -683,6 +729,18 @@ cdef class Workbook:
         if self._archive is not None:
             self._archive.close()
             self._archive = None
+            # Позначаємо саме факт закриття завантаженої книги: у lazy-режимі
+            # оригінальні XML листів у памʼяті не тримаються, тож після close
+            # зберегти їх нізвідки — save має впасти, а не писати порожні листи.
+            self._closed = True
+
+    cdef _check_open(self):
+        """Заборонити збереження книги, архів якої вже закрито (design D7.3)."""
+        if self._closed:
+            raise ValueError(
+                "Cannot save a workbook after close(): the source archive is no "
+                "longer available to read unmodified sheets from."
+            )
 
     cdef str _build_xf(self, int numFmtId, int fontId, int fillId, int borderId,
                        str align_xml, str prot_xml):
